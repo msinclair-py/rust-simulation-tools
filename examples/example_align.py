@@ -3,25 +3,32 @@ import numpy as np
 from rust_simulation_tools import kabsch_align
 
 # Load trajectory
-u = mda.Universe('../data/topology.pdb', '../data/trajectory.dcd')
+u = mda.Universe("topology.pdb", "trajectory.dcd")
 
 # Define selection for alignment (e.g., backbone atoms)
 align_selection = u.select_atoms("backbone")
 align_indices = align_selection.indices
 
+print(f"Number of atoms: {len(u.atoms)}")
+print(f"Number of alignment atoms: {len(align_indices)}")
+print(f"Alignment indices (first 10): {align_indices[:10]}")
+
 # Get reference structure (first frame or specific reference)
-reference = u.atoms.positions.copy().astype(np.float64)
+# No need to convert to float64! Works with MDAnalysis native float32
+reference = u.atoms.positions.copy()
 # Or use a specific reference structure
 # ref_u = mda.Universe("reference.pdb")
-# reference = ref_u.atoms.positions.astype(np.float64)
+# reference = ref_u.atoms.positions
 
 # Extract trajectory coordinates
 n_frames = len(u.trajectory)
 n_atoms = len(u.atoms)
-trajectory = np.zeros((n_frames, n_atoms, 3), dtype=np.float64)
+
+# Use MDAnalysis native dtype (float32) - no conversion needed!
+trajectory = np.zeros((n_frames, n_atoms, 3), dtype=u.atoms.positions.dtype)
 
 for i, ts in enumerate(u.trajectory):
-    trajectory[i] = u.atoms.positions.astype(np.float64)
+    trajectory[i] = u.atoms.positions
 
 # Convert align_indices to 1D array as expected by Rust function
 align_indices_1d = align_indices.astype(np.uintp)
@@ -30,14 +37,16 @@ align_indices_1d = align_indices.astype(np.uintp)
 aligned_trajectory = kabsch_align(trajectory, reference, align_indices_1d)
 
 # Write aligned trajectory back to MDAnalysis universe
-with mda.Writer('../data/aligned.dcd', n_atoms) as W:
+# You need to write to a NEW file, not modify the existing trajectory
+with mda.Writer("aligned_trajectory.dcd", n_atoms) as W:
     for i in range(n_frames):
-        u.trajectory[i]
-        u.atoms.positions = aligned_trajectory[i]
-        W.write(u.atoms)
+        u.trajectory[i]  # Move to frame i
+        u.atoms.positions = aligned_trajectory[i]  # Update positions
+        W.write(u.atoms)  # Write this frame
 
 print(f"Aligned {n_frames} frames using {len(align_indices)} atoms for alignment")
 print(f"Shape of aligned trajectory: {aligned_trajectory.shape}")
+print(f"Wrote aligned trajectory to: aligned_trajectory.dcd")
 
 # Example: Compare RMSD before and after alignment
 # For a proper test, use a different frame than the reference
