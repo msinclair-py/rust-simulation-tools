@@ -6,6 +6,10 @@ build-backend = "maturin"
 name = "rust_simulation_tools"
 version = "0.1.0"
 description = "Fast algorithms for MD trajectories"
+readme = "README.md"
+authors = {
+    {name = "Matt Sinclair", email = "msinclair01940@gmail.com"}
+}
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Rust",
