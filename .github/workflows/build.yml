@@ -92,11 +92,11 @@ jobs:
           pip install black flake8 mypy
       
       - name: Check Python formatting with black
-        run: black --check test_kabsch.py examples/
+        run: black --check tests/ examples/
         continue-on-error: true
       
       - name: Run flake8
-        run: flake8 test_kabsch.py examples/ --max-line-length=100
+        run: flake8 tests/ examples/ --max-line-length=100
         continue-on-error: true
 
   build-wheels:
@@ -158,7 +158,7 @@ jobs:
     needs: [test, build-wheels, build-sdist]
     
     steps:
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           path: dist
       
@@ -196,12 +196,15 @@ jobs:
         run: |
           pip install maturin pytest pytest-cov numpy coverage
       
-      - name: Build and install
-        run: maturin develop --release
+      - name: Build
+        run: maturin build --release --out dist
+
+      - name: Install
+        run: pip install --no-index --find-links dist rust_simulation_tools
       
       - name: Run tests with coverage
         run: |
-          pytest test_kabsch.py --cov=rust_simulation_tools --cov-report=html --cov-report=term
+          pytest tests/ --cov=rust_simulation_tools --cov-report=html --cov-report=term
       
       - name: Upload coverage HTML
         uses: actions/upload-artifact@v4
