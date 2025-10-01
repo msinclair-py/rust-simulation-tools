@@ -102,20 +102,20 @@ where
             // Step 1: Center on mobile centroid
             let mut centered = atom_coords;
             for j in 0..3 {
-                centered[j] = centered[j] - mobile_centroid[[0, j]];
+                centered[j] -= mobile_centroid[[0, j]];
             }
 
             // Step 2: Apply rotation (matrix-vector multiplication)
             let mut rotated = [T::zero(); 3];
             for i in 0..3 {
                 for j in 0..3 {
-                    rotated[i] = rotated[i] + rotation[[i, j]] * centered[j];
+                    rotated[i] += rotation[[i, j]] * centered[j];
                 }
             }
 
             // Step 3: Translate to reference centroid
             for j in 0..3 {
-                rotated[j] = rotated[j] + ref_centroid[[0, j]];
+                rotated[j] += ref_centroid[[0, j]];
             }
 
             // Store in output
@@ -317,12 +317,10 @@ where
 
                 if delta > half_box {
                     // Wrapped backward (right to left)
-                    cumulative_shifts[[atom_idx, dim]] =
-                        cumulative_shifts[[atom_idx, dim]] - box_dims[dim];
+                    cumulative_shifts[[atom_idx, dim]] -= box_dims[dim];
                 } else if delta < -half_box {
                     // Wrapped forward (left to right)
-                    cumulative_shifts[[atom_idx, dim]] =
-                        cumulative_shifts[[atom_idx, dim]] + box_dims[dim];
+                    cumulative_shifts[[atom_idx, dim]] += box_dims[dim];
                 }
 
                 // Store unwrapped coordinate
