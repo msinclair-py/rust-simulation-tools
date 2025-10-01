@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 /// reference : ndarray (num_atoms, 3)
 ///     Reference structure coordinates (float32 or float64)
 /// align_indices : ndarray (num_align_atoms,)
-///     Indices of atoms to use for alignment calculation
+///     Indices of atoms to use for alignment calculation (any integer type)
 ///
 /// Returns
 /// -------
@@ -22,16 +22,32 @@ fn kabsch_align(
     py: Python,
     trajectory: &PyAny,
     reference: &PyAny,
-    align_indices: PyReadonlyArray1<usize>,
+    align_indices: &PyAny,
 ) -> PyResult<PyObject> {
+    // Convert indices to Vec<usize> from any integer array type
+    let indices: Vec<usize> = if let Ok(idx_i64) = align_indices.extract::<PyReadonlyArray1<i64>>()
+    {
+        idx_i64.as_array().iter().map(|&x| x as usize).collect()
+    } else if let Ok(idx_i32) = align_indices.extract::<PyReadonlyArray1<i32>>() {
+        idx_i32.as_array().iter().map(|&x| x as usize).collect()
+    } else if let Ok(idx_u64) = align_indices.extract::<PyReadonlyArray1<u64>>() {
+        idx_u64.as_array().iter().map(|&x| x as usize).collect()
+    } else if let Ok(idx_usize) = align_indices.extract::<PyReadonlyArray1<usize>>() {
+        idx_usize.as_array().to_vec()
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "align_indices must be an integer array",
+        ));
+    };
+
     // Check if input is float32 or float64 and dispatch accordingly
     if let Ok(traj_f32) = trajectory.extract::<PyReadonlyArray3<f32>>() {
         let ref_f32 = reference.extract::<PyReadonlyArray2<f32>>()?;
-        let result = kabsch_align_generic(py, traj_f32, ref_f32, align_indices)?;
+        let result = kabsch_align_generic(py, traj_f32, ref_f32, &indices)?;
         Ok(result.to_object(py))
     } else if let Ok(traj_f64) = trajectory.extract::<PyReadonlyArray3<f64>>() {
         let ref_f64 = reference.extract::<PyReadonlyArray2<f64>>()?;
-        let result = kabsch_align_generic(py, traj_f64, ref_f64, align_indices)?;
+        let result = kabsch_align_generic(py, traj_f64, ref_f64, &indices)?;
         Ok(result.to_object(py))
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -45,22 +61,21 @@ fn kabsch_align_generic<'py, T>(
     py: Python<'py>,
     trajectory: PyReadonlyArray3<T>,
     reference: PyReadonlyArray2<T>,
-    align_indices: PyReadonlyArray1<usize>,
+    align_indices: &[usize],
 ) -> PyResult<&'py PyArray3<T>>
 where
     T: numpy::Element + ndarray::NdFloat,
 {
     let traj = trajectory.as_array();
     let ref_coords = reference.as_array();
-    let indices = align_indices.as_array();
 
     let num_frames = traj.shape()[0];
     let num_atoms = traj.shape()[1];
-    let num_align = indices.len();
+    let num_align = align_indices.len();
 
     // Extract alignment atoms from reference
     let mut ref_align = Array2::<T>::zeros((num_align, 3));
-    for (i, &idx) in indices.iter().enumerate() {
+    for (i, &idx) in align_indices.iter().enumerate() {
         for j in 0..3 {
             ref_align[[i, j]] = ref_coords[[idx, j]];
         }
@@ -78,7 +93,7 @@ where
 
         // Extract alignment atoms from current frame
         let mut mobile_align = Array2::<T>::zeros((num_align, 3));
-        for (i, &idx) in indices.iter().enumerate() {
+        for (i, &idx) in align_indices.iter().enumerate() {
             for j in 0..3 {
                 mobile_align[[i, j]] = frame[[idx, j]];
             }
@@ -208,7 +223,7 @@ where
 /// box_dimensions : ndarray (num_frames, 3) or (num_frames, 6)
 ///     Box dimensions for each frame (float32 or float64)
 /// fragment_indices : ndarray (num_atoms,)
-///     Fragment/molecule ID for each atom. Atoms with the same ID are kept together.
+///     Fragment/molecule ID for each atom (any integer type)
 ///
 /// Returns
 /// -------
@@ -219,16 +234,32 @@ fn unwrap_system(
     py: Python,
     trajectory: &PyAny,
     box_dimensions: &PyAny,
-    fragment_indices: PyReadonlyArray1<usize>,
+    fragment_indices: &PyAny,
 ) -> PyResult<PyObject> {
+    // Convert indices to Vec<usize> from any integer array type
+    let indices: Vec<usize> =
+        if let Ok(idx_i64) = fragment_indices.extract::<PyReadonlyArray1<i64>>() {
+            idx_i64.as_array().iter().map(|&x| x as usize).collect()
+        } else if let Ok(idx_i32) = fragment_indices.extract::<PyReadonlyArray1<i32>>() {
+            idx_i32.as_array().iter().map(|&x| x as usize).collect()
+        } else if let Ok(idx_u64) = fragment_indices.extract::<PyReadonlyArray1<u64>>() {
+            idx_u64.as_array().iter().map(|&x| x as usize).collect()
+        } else if let Ok(idx_usize) = fragment_indices.extract::<PyReadonlyArray1<usize>>() {
+            idx_usize.as_array().to_vec()
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "fragment_indices must be an integer array",
+            ));
+        };
+
     // Check if input is float32 or float64 and dispatch accordingly
     if let Ok(traj_f32) = trajectory.extract::<PyReadonlyArray3<f32>>() {
         let box_f32 = box_dimensions.extract::<PyReadonlyArray2<f32>>()?;
-        let result = unwrap_system_generic(py, traj_f32, box_f32, fragment_indices)?;
+        let result = unwrap_system_generic(py, traj_f32, box_f32, &indices)?;
         Ok(result.to_object(py))
     } else if let Ok(traj_f64) = trajectory.extract::<PyReadonlyArray3<f64>>() {
         let box_f64 = box_dimensions.extract::<PyReadonlyArray2<f64>>()?;
-        let result = unwrap_system_generic(py, traj_f64, box_f64, fragment_indices)?;
+        let result = unwrap_system_generic(py, traj_f64, box_f64, &indices)?;
         Ok(result.to_object(py))
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -242,14 +273,13 @@ fn unwrap_system_generic<'py, T>(
     py: Python<'py>,
     trajectory: PyReadonlyArray3<T>,
     box_dimensions: PyReadonlyArray2<T>,
-    fragment_indices: PyReadonlyArray1<usize>,
+    fragment_indices: &[usize],
 ) -> PyResult<&'py PyArray3<T>>
 where
     T: numpy::Element + ndarray::NdFloat,
 {
     let traj = trajectory.as_array();
     let boxes = box_dimensions.as_array();
-    let fragments = fragment_indices.as_array();
 
     let num_frames = traj.shape()[0];
     let num_atoms = traj.shape()[1];
@@ -261,7 +291,7 @@ where
         ));
     }
 
-    if fragments.len() != num_atoms {
+    if fragment_indices.len() != num_atoms {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Fragment indices length must match number of atoms",
         ));

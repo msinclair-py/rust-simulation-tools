@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rust_simulation_tools"
-version = "0.1.3"
+version = "0.1.4"
 description = "Fast algorithms for MD trajectories"
 readme = "README.md"
 authors = [

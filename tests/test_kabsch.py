@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from rust_simulation_tools import kabsch_align
+from rust_simulation_tools import kabsch_align, unwrap_system
 
 
 class TestKabschAlign:
@@ -29,7 +29,7 @@ class TestKabschAlign:
         
         mobile = reference @ rotation_matrix.T
         trajectory = mobile.reshape(1, 3, 3)
-        align_indices = np.array([0, 1, 2], dtype=np.uintp)
+        align_indices = np.array([0, 1, 2])  # No dtype needed!
         
         aligned = kabsch_align(trajectory, reference, align_indices)
         
@@ -44,7 +44,7 @@ class TestKabschAlign:
         
         mobile = reference + translation
         trajectory = mobile.reshape(1, 3, 3)
-        align_indices = np.array([0, 1, 2], dtype=np.uintp)
+        align_indices = np.array([0, 1, 2])
         
         aligned = kabsch_align(trajectory, reference, align_indices)
         
@@ -67,7 +67,7 @@ class TestKabschAlign:
         
         mobile = reference @ rotation_matrix.T + translation
         trajectory = mobile.reshape(1, 3, 3)
-        align_indices = np.array([0, 1, 2], dtype=np.uintp)
+        align_indices = np.array([0, 1, 2])
         
         aligned = kabsch_align(trajectory, reference, align_indices)
         
@@ -98,7 +98,7 @@ class TestKabschAlign:
             translation = np.array([i * 2.0, i * 3.0, i * 1.0])
             trajectory[i] = reference @ rotation_matrix.T + translation
         
-        align_indices = np.array([0, 1, 2, 3], dtype=np.uintp)
+        align_indices = np.array([0, 1, 2, 3])
         
         aligned = kabsch_align(trajectory, reference, align_indices)
         
@@ -134,7 +134,7 @@ class TestKabschAlign:
         trajectory = mobile.reshape(1, 6, 3)
         
         # Only align using first 3 atoms
-        align_indices = np.array([0, 1, 2], dtype=np.uintp)
+        align_indices = np.array([0, 1, 2])
         
         aligned = kabsch_align(trajectory, reference, align_indices)
         
@@ -156,7 +156,7 @@ class TestKabschAlign:
         mobile = reference.copy()
         
         trajectory = mobile.reshape(1, 3, 3)
-        align_indices = np.array([0, 1, 2], dtype=np.uintp)
+        align_indices = np.array([0, 1, 2])
         
         aligned = kabsch_align(trajectory, reference, align_indices)
         
@@ -179,7 +179,7 @@ class TestKabschAlign:
         
         mobile = reference @ rotation_matrix.T + translation
         trajectory = mobile.reshape(1, 10, 3)
-        align_indices = np.arange(10, dtype=np.uintp)
+        align_indices = np.arange(10)
         
         aligned = kabsch_align(trajectory, reference, align_indices)
         
@@ -195,3 +195,4 @@ class TestKabschAlign:
 if __name__ == "__main__":
     # Run tests with verbose output
     pytest.main([__file__, "-v", "--tb=short"])
+

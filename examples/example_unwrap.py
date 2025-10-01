@@ -5,9 +5,8 @@ from rust_simulation_tools import unwrap_system
 # Load trajectory
 u = mda.Universe("topology.pdb", "trajectory.dcd")
 
-# Get fragment (molecule) assignments
-# Each atom gets an ID indicating which molecule it belongs to
-fragment_indices = np.zeros(len(u.atoms), dtype=np.uintp)
+# Get fragment (molecule) assignments - no dtype conversion needed!
+fragment_indices = np.zeros(len(u.atoms), dtype=np.int64)
 for frag_id, fragment in enumerate(u.atoms.fragments):
     fragment_indices[fragment.indices] = frag_id
 

@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "rust-simulation-tools"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "nalgebra",
  "ndarray",
