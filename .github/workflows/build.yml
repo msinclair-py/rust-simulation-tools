@@ -124,7 +124,7 @@ jobs:
           manylinux: auto
       
       - name: Upload wheels
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
@@ -145,7 +145,7 @@ jobs:
           args: --out dist
       
       - name: Upload sdist
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -204,7 +204,7 @@ jobs:
           pytest test_kabsch.py --cov=rust_simulation_tools --cov-report=html --cov-report=term
       
       - name: Upload coverage HTML
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: htmlcov/
