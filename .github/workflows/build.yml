@@ -53,16 +53,6 @@ jobs:
       - name: Run tests with coverage
         run: |
           pytest tests/ -v --cov=rust_simulation_tools --cov-report=xml --cov-report=term
-      
-      - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
-        uses: codecov/codecov-action@v5
-        with:
-          file: ./coverage.xml
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
 
   lint:
     name: Lint and format checks
@@ -175,40 +165,3 @@ jobs:
         with:
           command: upload
           args: --skip-existing final_dist/*
-
-  coverage-report:
-    name: Generate coverage report
-    runs-on: ubuntu-latest
-    needs: [test]
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      
-      - name: Install dependencies
-        run: |
-          pip install maturin pytest pytest-cov numpy coverage
-      
-      - name: Build
-        run: maturin build --release --out dist
-
-      - name: Install
-        run: pip install --no-index --find-links dist rust_simulation_tools
-      
-      - name: Run tests with coverage
-        run: |
-          pytest tests/ --cov=rust_simulation_tools --cov-report=html --cov-report=term
-      
-      - name: Upload coverage HTML
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: htmlcov/
-          retention-days: 30

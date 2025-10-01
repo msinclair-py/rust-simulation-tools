@@ -1,7 +1,6 @@
 # Rust Simulation Tools
 
 [![CI/CD](https://github.com/msinclair-py/rust-simulation-tools/workflows/CI%2FCD/badge.svg)](https://github.com/msinclair-py/rust-simulation-tools/actions)
-[![codecov](https://codecov.io/gh/msinclair-py/rust-simulation-tools/branch/main/graph/badge.svg)](https://codecov.io/gh/msinclair-py/rust-simulation-tools)
 [![PyPI version](https://badge.fury.io/py/rust-simulation-tools.svg)](https://badge.fury.io/py/rust-simulation-tools)
 [![Python versions](https://img.shields.io/pypi/pyversions/rust-simulation-tools.svg)](https://pypi.org/project/rust-simulation-tools/)
 
