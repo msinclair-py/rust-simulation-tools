@@ -25,8 +25,7 @@ fn kabsch_align(
     align_indices: &PyAny,
 ) -> PyResult<PyObject> {
     // Convert indices to Vec<usize> from any integer array type
-    let indices: Vec<usize> = if let Ok(idx_i64) = align_indices.extract::<PyReadonlyArray1<i64>>()
-    {
+    let indices: Vec<usize> = if let Ok(idx_i64) = align_indices.extract::<PyReadonlyArray1<i64>>() {
         idx_i64.as_array().iter().map(|&x| x as usize).collect()
     } else if let Ok(idx_i32) = align_indices.extract::<PyReadonlyArray1<i32>>() {
         idx_i32.as_array().iter().map(|&x| x as usize).collect()
@@ -39,14 +38,20 @@ fn kabsch_align(
             "align_indices must be an integer array",
         ));
     };
-
+    
     // Check if input is float32 or float64 and dispatch accordingly
     if let Ok(traj_f32) = trajectory.extract::<PyReadonlyArray3<f32>>() {
-        let ref_f32 = reference.extract::<PyReadonlyArray2<f32>>()?;
+        let ref_f32 = reference.extract::<PyReadonlyArray2<f32>>()
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "trajectory and reference must have the same dtype (both float32 or both float64)"
+            ))?;
         let result = kabsch_align_generic(py, traj_f32, ref_f32, &indices)?;
         Ok(result.to_object(py))
     } else if let Ok(traj_f64) = trajectory.extract::<PyReadonlyArray3<f64>>() {
-        let ref_f64 = reference.extract::<PyReadonlyArray2<f64>>()?;
+        let ref_f64 = reference.extract::<PyReadonlyArray2<f64>>()
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "trajectory and reference must have the same dtype (both float32 or both float64)"
+            ))?;
         let result = kabsch_align_generic(py, traj_f64, ref_f64, &indices)?;
         Ok(result.to_object(py))
     } else {
@@ -237,28 +242,33 @@ fn unwrap_system(
     fragment_indices: &PyAny,
 ) -> PyResult<PyObject> {
     // Convert indices to Vec<usize> from any integer array type
-    let indices: Vec<usize> =
-        if let Ok(idx_i64) = fragment_indices.extract::<PyReadonlyArray1<i64>>() {
-            idx_i64.as_array().iter().map(|&x| x as usize).collect()
-        } else if let Ok(idx_i32) = fragment_indices.extract::<PyReadonlyArray1<i32>>() {
-            idx_i32.as_array().iter().map(|&x| x as usize).collect()
-        } else if let Ok(idx_u64) = fragment_indices.extract::<PyReadonlyArray1<u64>>() {
-            idx_u64.as_array().iter().map(|&x| x as usize).collect()
-        } else if let Ok(idx_usize) = fragment_indices.extract::<PyReadonlyArray1<usize>>() {
-            idx_usize.as_array().to_vec()
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "fragment_indices must be an integer array",
-            ));
-        };
-
+    let indices: Vec<usize> = if let Ok(idx_i64) = fragment_indices.extract::<PyReadonlyArray1<i64>>() {
+        idx_i64.as_array().iter().map(|&x| x as usize).collect()
+    } else if let Ok(idx_i32) = fragment_indices.extract::<PyReadonlyArray1<i32>>() {
+        idx_i32.as_array().iter().map(|&x| x as usize).collect()
+    } else if let Ok(idx_u64) = fragment_indices.extract::<PyReadonlyArray1<u64>>() {
+        idx_u64.as_array().iter().map(|&x| x as usize).collect()
+    } else if let Ok(idx_usize) = fragment_indices.extract::<PyReadonlyArray1<usize>>() {
+        idx_usize.as_array().to_vec()
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "fragment_indices must be an integer array",
+        ));
+    };
+    
     // Check if input is float32 or float64 and dispatch accordingly
     if let Ok(traj_f32) = trajectory.extract::<PyReadonlyArray3<f32>>() {
-        let box_f32 = box_dimensions.extract::<PyReadonlyArray2<f32>>()?;
+        let box_f32 = box_dimensions.extract::<PyReadonlyArray2<f32>>()
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "trajectory and box_dimensions must have the same dtype (both float32 or both float64)"
+            ))?;
         let result = unwrap_system_generic(py, traj_f32, box_f32, &indices)?;
         Ok(result.to_object(py))
     } else if let Ok(traj_f64) = trajectory.extract::<PyReadonlyArray3<f64>>() {
-        let box_f64 = box_dimensions.extract::<PyReadonlyArray2<f64>>()?;
+        let box_f64 = box_dimensions.extract::<PyReadonlyArray2<f64>>()
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "trajectory and box_dimensions must have the same dtype (both float32 or both float64)"
+            ))?;
         let result = unwrap_system_generic(py, traj_f64, box_f64, &indices)?;
         Ok(result.to_object(py))
     } else {
@@ -344,7 +354,7 @@ where
 
                 // Use minimum image convention: if displacement > box/2, wrapped
                 let half_box = box_dims[dim] / T::from(2.0).unwrap();
-
+                
                 if delta > half_box {
                     // Wrapped backward (right to left)
                     cumulative_shifts[[atom_idx, dim]] -= box_dims[dim];
