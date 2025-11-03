@@ -18,7 +18,7 @@ use pyo3::prelude::*;
 /// aligned : ndarray (num_frames, num_atoms, 3)
 ///     Aligned trajectory coordinates (same dtype as input)
 #[pyfunction]
-fn kabsch_align(
+pub fn kabsch_align(
     py: Python,
     trajectory: &PyAny,
     reference: &PyAny,

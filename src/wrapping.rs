@@ -21,7 +21,7 @@ use pyo3::prelude::*;
 /// unwrapped : ndarray (num_frames, num_atoms, 3)
 ///     Unwrapped trajectory coordinates (same dtype as input)
 #[pyfunction]
-fn unwrap_system(
+pub fn unwrap_system(
     py: Python,
     trajectory: &PyAny,
     box_dimensions: &PyAny,

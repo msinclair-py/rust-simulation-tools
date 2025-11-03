@@ -12,6 +12,7 @@ pyo3 = { version = "0.20", features = ["extension-module"] }
 numpy = "0.20"
 ndarray = "0.15"
 nalgebra = "0.32"
+rayon = "1.11.0"
 
 [profile.release]
 opt-level = 3
