@@ -1,0 +1,4 @@
+parm ../data/unwrapping.pdb
+trajin ../data/unwrapping.dcd
+autoimage
+unwrap
