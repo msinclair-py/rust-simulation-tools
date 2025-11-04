@@ -31,11 +31,11 @@ u = mda.Universe("topology.pdb", "trajectory.dcd")
 
 # Select alignment atoms
 align_selection = u.select_atoms("backbone")
-align_indices = align_selection.indices
+align_indices = align_selection.indices.astype(np.int32)
 
 # Get coordinates
-reference = u.atoms.positions.copy()
-trajectory = np.array([ts.positions for ts in u.trajectory])
+reference = u.atoms.positions.copy().astype(np.float32)
+trajectory = np.array([ts.positions for ts in u.trajectory], dtype=np.float32)
 
 # Align
 aligned = kabsch_align(trajectory, reference, align_indices)
@@ -55,6 +55,15 @@ unwrap_system(
     box_dimensions: np.ndarray,  # float, shape [n_frames, 3]
     fragment_idx: np.ndarray     # int,   shape [n_atoms]
 ) -> np.ndarray                  # float, shape [n_frames, n_atoms, 3]
+
+calculate_sasa(
+    coordinates: np.ndarray,     # float, shape [n_frames, n_atoms, 3]
+    radii: np.ndarray,           # float, shape [n_atoms]
+    residue_indices: np.ndarray  # float, shape [n_atoms]
+    probe_radius: float=1.4      # float, default 1.4
+    n_sphere_points: int=960     # int, default 960
+) -> dict[str, np.ndarray]       # dict, keys: ['per_atom', 'per_residue', 'total']
+
 ```
 
 ## Development

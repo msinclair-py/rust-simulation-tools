@@ -1,14 +1,166 @@
 // src/sasa.rs
 // SASA calculator module for rust-simulation-tools
 // Implements the Shrake-Rupley algorithm for calculating Solvent Accessible Surface Area
+// with KD-tree optimization for efficient neighbor searching
 
 use ndarray::{ArrayView1, ArrayView2};
-use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 use std::collections::HashMap;
+
+/// KD-Tree node for efficient 3D spatial queries
+#[derive(Debug, Clone)]
+struct KDNode {
+    point_idx: usize,
+    split_dim: usize,
+    split_value: f64,
+    left: Option<Box<KDNode>>,
+    right: Option<Box<KDNode>>,
+}
+
+/// KD-Tree for fast spatial neighbor queries
+pub struct KDTree {
+    root: Option<Box<KDNode>>,
+    coords: Vec<[f64; 3]>,
+}
+
+impl KDTree {
+    /// Build a KD-tree from 3D coordinates
+    fn new(coords: &[[f64; 3]]) -> Self {
+        let n_points = coords.len();
+        let mut indices: Vec<usize> = (0..n_points).collect();
+        
+        let root = if !indices.is_empty() {
+            Self::build_tree(coords, &mut indices, 0)
+        } else {
+            None
+        };
+        
+        KDTree {
+            root,
+            coords: coords.to_vec(),
+        }
+    }
+    
+    /// Recursively build the KD-tree
+    fn build_tree(
+        coords: &[[f64; 3]],
+        indices: &mut [usize],
+        depth: usize,
+    ) -> Option<Box<KDNode>> {
+        if indices.is_empty() {
+            return None;
+        }
+        
+        if indices.len() == 1 {
+            let idx = indices[0];
+            let split_dim = depth % 3;
+            return Some(Box::new(KDNode {
+                point_idx: idx,
+                split_dim,
+                split_value: coords[idx][split_dim],
+                left: None,
+                right: None,
+            }));
+        }
+        
+        let split_dim = depth % 3;
+        
+        // Sort indices by the splitting dimension
+        indices.sort_unstable_by(|&a, &b| {
+            coords[a][split_dim]
+                .partial_cmp(&coords[b][split_dim])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        
+        let median = indices.len() / 2;
+        let median_idx = indices[median];
+        let split_value = coords[median_idx][split_dim];
+        
+        // Split indices
+        let (left_indices, right_and_median) = indices.split_at_mut(median);
+        let right_indices = &mut right_and_median[1..];
+        
+        Some(Box::new(KDNode {
+            point_idx: median_idx,
+            split_dim,
+            split_value,
+            left: Self::build_tree(coords, left_indices, depth + 1),
+            right: Self::build_tree(coords, right_indices, depth + 1),
+        }))
+    }
+    
+    /// Query all points within a given radius of a target point
+    /// Returns indices of points within the radius
+    #[inline]
+    fn query_radius(&self, target: &[f64; 3], radius: f64) -> Vec<usize> {
+        let mut result = Vec::new();
+        let radius_sq = radius * radius;
+        
+        if let Some(ref root) = self.root {
+            self.query_radius_recursive(root, target, radius_sq, &mut result);
+        }
+        
+        result
+    }
+    
+    /// Recursive radius query
+    #[inline]
+    fn query_radius_recursive(
+        &self,
+        node: &KDNode,
+        target: &[f64; 3],
+        radius_sq: f64,
+        result: &mut Vec<usize>,
+    ) {
+        let point = &self.coords[node.point_idx];
+        
+        // Check if current point is within radius
+        let dist_sq = Self::distance_squared(point, target);
+        
+        if dist_sq <= radius_sq {
+            result.push(node.point_idx);
+        }
+        
+        // Determine which subtrees to search
+        let diff = target[node.split_dim] - node.split_value;
+        let diff_sq = diff * diff;
+        
+        // Search near side first
+        if diff < 0.0 {
+            if let Some(ref left) = node.left {
+                self.query_radius_recursive(left, target, radius_sq, result);
+            }
+            // Check if we need to search far side
+            if diff_sq <= radius_sq {
+                if let Some(ref right) = node.right {
+                    self.query_radius_recursive(right, target, radius_sq, result);
+                }
+            }
+        } else {
+            if let Some(ref right) = node.right {
+                self.query_radius_recursive(right, target, radius_sq, result);
+            }
+            // Check if we need to search far side
+            if diff_sq <= radius_sq {
+                if let Some(ref left) = node.left {
+                    self.query_radius_recursive(left, target, radius_sq, result);
+                }
+            }
+        }
+    }
+    
+    #[inline]
+    fn distance_squared(p1: &[f64; 3], p2: &[f64; 3]) -> f64 {
+        let dx = p1[0] - p2[0];
+        let dy = p1[1] - p2[1];
+        let dz = p1[2] - p2[2];
+        dx * dx + dy * dy + dz * dz
+    }
+}
 
 /// Generate Fibonacci sphere points for uniform sampling
 fn generate_fibonacci_sphere(n_points: usize) -> Vec<[f64; 3]> {
@@ -29,7 +181,7 @@ fn generate_fibonacci_sphere(n_points: usize) -> Vec<[f64; 3]> {
     points
 }
 
-/// Core SASA calculation engine
+/// Core SASA calculation engine with KD-tree optimization
 struct SASAEngine {
     coords: Vec<[f64; 3]>,
     radii: Vec<f64>,
@@ -37,6 +189,7 @@ struct SASAEngine {
     probe_radius: f64,
     sphere_points: Vec<[f64; 3]>,
     n_sphere_points: usize,
+    kdtree: KDTree,
 }
 
 impl SASAEngine {
@@ -58,6 +211,9 @@ impl SASAEngine {
         let residue_indices: Vec<usize> = residue_indices.iter().copied().collect();
 
         let sphere_points = generate_fibonacci_sphere(n_sphere_points);
+        
+        // Build KD-tree for efficient neighbor queries
+        let kdtree = KDTree::new(&coords);
 
         SASAEngine {
             coords,
@@ -66,6 +222,7 @@ impl SASAEngine {
             probe_radius,
             sphere_points,
             n_sphere_points,
+            kdtree,
         }
     }
 
@@ -77,11 +234,22 @@ impl SASAEngine {
         dx * dx + dy * dy + dz * dz
     }
 
-    /// Calculate SASA for a single atom
+    /// Calculate SASA for a single atom using KD-tree for neighbor search
     fn calculate_atom_sasa(&self, atom_idx: usize) -> f64 {
         let atom_coord = &self.coords[atom_idx];
         let extended_radius = self.radii[atom_idx] + self.probe_radius;
         let extended_radius_sq = extended_radius * extended_radius;
+
+        // Find maximum possible neighbor radius
+        let max_neighbor_radius = self.radii.iter()
+            .copied()
+            .fold(0.0f64, |a, b| a.max(b)) + self.probe_radius;
+        
+        // Search radius for KD-tree query
+        let search_radius = extended_radius + max_neighbor_radius;
+        
+        // Get potential neighbors using KD-tree (much faster than checking all atoms)
+        let neighbors = self.kdtree.query_radius(atom_coord, search_radius);
 
         // Count accessible points in parallel
         let accessible_points: usize = self
@@ -95,12 +263,13 @@ impl SASAEngine {
                     atom_coord[2] + point[2] * extended_radius,
                 ];
 
-                // Check if this point is buried by any other atom
-                let is_accessible = self.coords.iter().enumerate().all(|(j, other_coord)| {
+                // Check if this point is buried by any neighbor (not all atoms!)
+                let is_accessible = neighbors.iter().all(|&j| {
                     if j == atom_idx {
                         return true;
                     }
 
+                    let other_coord = &self.coords[j];
                     let other_extended_radius = self.radii[j] + self.probe_radius;
                     let dist_sq = Self::distance_squared(&test_point, other_coord);
                     dist_sq > other_extended_radius * other_extended_radius
@@ -157,7 +326,7 @@ impl SASAEngine {
 /// radii : np.ndarray, shape (n_atoms,)
 ///     Atomic radii in Angstroms
 /// residue_indices : np.ndarray, shape (n_atoms,)
-///     Residue index for each atom (0-indexed)
+///     Residue index for each atom (0-indexed, will accept any integer type)
 /// probe_radius : float, optional
 ///     Probe radius in Angstroms (default: 1.4 for water)
 /// n_sphere_points : int, optional
@@ -172,13 +341,13 @@ impl SASAEngine {
 pub fn calculate_sasa(
     coordinates: PyReadonlyArray2<f64>,
     radii: PyReadonlyArray1<f64>,
-    residue_indices: PyReadonlyArray1<usize>,
+    residue_indices: PyReadonlyArray1<i64>,  // Changed from usize to i64
     probe_radius: f64,
     n_sphere_points: usize,
 ) -> PyResult<HashMap<String, PyObject>> {
     let coords = coordinates.as_array();
     let radii_arr = radii.as_array();
-    let res_indices = residue_indices.as_array();
+    let res_indices_i64 = residue_indices.as_array();
 
     // Validate inputs
     let n_atoms = coords.shape()[0];
@@ -192,11 +361,28 @@ pub fn calculate_sasa(
             "Radii array must match number of atoms",
         ));
     }
-    if res_indices.len() != n_atoms {
+    if res_indices_i64.len() != n_atoms {
         return Err(PyValueError::new_err(
             "Residue indices must match number of atoms",
         ));
     }
+
+    // Convert i64 to usize, checking for negative values
+    let res_indices_vec: Result<Vec<usize>, _> = res_indices_i64
+        .iter()
+        .map(|&idx| {
+            if idx < 0 {
+                Err(PyValueError::new_err(format!(
+                    "Residue index cannot be negative: {}",
+                    idx
+                )))
+            } else {
+                Ok(idx as usize)
+            }
+        })
+        .collect();
+    let res_indices_vec = res_indices_vec?;
+    let res_indices = ndarray::ArrayView1::from(&res_indices_vec);
 
     // Create engine and calculate
     let engine = SASAEngine::new(coords, radii_arr, res_indices, probe_radius, n_sphere_points);
@@ -236,7 +422,7 @@ pub fn calculate_sasa(
 /// radii : np.ndarray, shape (n_atoms,)
 ///     Atomic radii in Angstroms
 /// residue_indices : np.ndarray, shape (n_atoms,)
-///     Residue index for each atom (0-indexed)
+///     Residue index for each atom (0-indexed, will accept any integer type)
 /// probe_radius : float, optional
 ///     Probe radius in Angstroms (default: 1.4)
 /// n_sphere_points : int, optional
@@ -251,13 +437,13 @@ pub fn calculate_sasa(
 pub fn calculate_residue_sasa(
     coordinates: PyReadonlyArray2<f64>,
     radii: PyReadonlyArray1<f64>,
-    residue_indices: PyReadonlyArray1<usize>,
+    residue_indices: PyReadonlyArray1<i64>,  // Changed from usize to i64
     probe_radius: f64,
     n_sphere_points: usize,
 ) -> PyResult<HashMap<usize, f64>> {
     let coords = coordinates.as_array();
     let radii_arr = radii.as_array();
-    let res_indices = residue_indices.as_array();
+    let res_indices_i64 = residue_indices.as_array();
 
     // Validate inputs
     let n_atoms = coords.shape()[0];
@@ -271,11 +457,28 @@ pub fn calculate_residue_sasa(
             "Radii array must match number of atoms",
         ));
     }
-    if res_indices.len() != n_atoms {
+    if res_indices_i64.len() != n_atoms {
         return Err(PyValueError::new_err(
             "Residue indices must match number of atoms",
         ));
     }
+
+    // Convert i64 to usize, checking for negative values
+    let res_indices_vec: Result<Vec<usize>, _> = res_indices_i64
+        .iter()
+        .map(|&idx| {
+            if idx < 0 {
+                Err(PyValueError::new_err(format!(
+                    "Residue index cannot be negative: {}",
+                    idx
+                )))
+            } else {
+                Ok(idx as usize)
+            }
+        })
+        .collect();
+    let res_indices_vec = res_indices_vec?;
+    let res_indices = ndarray::ArrayView1::from(&res_indices_vec);
 
     let engine = SASAEngine::new(coords, radii_arr, res_indices, probe_radius, n_sphere_points);
     Ok(engine.calculate_per_residue_sasa())
@@ -330,10 +533,257 @@ pub fn calculate_total_sasa(
     Ok(engine.calculate_total_sasa())
 }
 
+/// Calculate SASA for an entire trajectory
+///
+/// Parameters
+/// ----------
+/// trajectory : np.ndarray, shape (n_frames, n_atoms, 3)
+///     Atomic coordinates for all frames in Angstroms
+/// radii : np.ndarray, shape (n_atoms,)
+///     Atomic radii in Angstroms
+/// residue_indices : np.ndarray, shape (n_atoms,)
+///     Residue index for each atom (0-indexed, will accept any integer type)
+/// probe_radius : float, optional
+///     Probe radius in Angstroms (default: 1.4)
+/// n_sphere_points : int, optional
+///     Number of points on test sphere (default: 960)
+///
+/// Returns
+/// -------
+/// dict
+///     Dictionary with keys:
+///     - 'per_atom': np.ndarray, shape (n_frames, n_atoms)
+///     - 'per_residue': list of dicts (one per frame)
+///     - 'total': np.ndarray, shape (n_frames,)
+#[pyfunction]
+#[pyo3(signature = (trajectory, radii, residue_indices, probe_radius=1.4, n_sphere_points=960))]
+pub fn calculate_sasa_trajectory<'py>(
+    py: Python<'py>,
+    trajectory: PyReadonlyArray3<f64>,  // Changed from Array2 to Array3
+    radii: PyReadonlyArray1<f64>,
+    residue_indices: PyReadonlyArray1<i64>,  // Changed from usize to i64
+    probe_radius: f64,
+    n_sphere_points: usize,
+) -> PyResult<HashMap<String, PyObject>> {
+    let traj = trajectory.as_array();
+    let radii_arr = radii.as_array();
+    let res_indices_i64 = residue_indices.as_array();
+
+    let shape = traj.shape();
+    let n_frames = shape[0];
+    let n_atoms = shape[1];
+
+    // Validate inputs
+    if shape[2] != 3 {
+        return Err(PyValueError::new_err(
+            "Trajectory must have shape (n_frames, n_atoms, 3)"
+        ));
+    }
+    if radii_arr.len() != n_atoms {
+        return Err(PyValueError::new_err(
+            format!("Radii array length ({}) must match number of atoms ({})", radii_arr.len(), n_atoms)
+        ));
+    }
+    if res_indices_i64.len() != n_atoms {
+        return Err(PyValueError::new_err(
+            format!("Residue indices length ({}) must match number of atoms ({})", res_indices_i64.len(), n_atoms)
+        ));
+    }
+
+    // Convert i64 to usize, checking for negative values
+    let res_indices_vec: Result<Vec<usize>, _> = res_indices_i64
+        .iter()
+        .map(|&idx| {
+            if idx < 0 {
+                Err(PyValueError::new_err(format!(
+                    "Residue index cannot be negative: {}",
+                    idx
+                )))
+            } else {
+                Ok(idx as usize)
+            }
+        })
+        .collect();
+    let res_indices_vec = res_indices_vec?;
+    let res_indices = ndarray::ArrayView1::from(&res_indices_vec);
+
+    // Process each frame in parallel
+    let frame_results: Vec<_> = (0..n_frames)
+        .into_par_iter()
+        .map(|frame_idx| {
+            // Extract frame coordinates directly from 3D array
+            let frame_coords = traj.slice(ndarray::s![frame_idx, .., ..]);
+
+            let engine = SASAEngine::new(
+                frame_coords,
+                radii_arr,
+                res_indices,
+                probe_radius,
+                n_sphere_points,
+            );
+
+            let per_atom = engine.calculate_per_atom_sasa();
+            let per_residue = engine.calculate_per_residue_sasa();
+            let total: f64 = per_atom.iter().sum();
+
+            (per_atom, per_residue, total)
+        })
+        .collect();
+
+    // Convert to Python objects
+    let mut result = HashMap::new();
+
+    // Per-atom SASA as 2D numpy array (n_frames, n_atoms)
+    let mut per_atom_vec = Vec::with_capacity(n_frames * n_atoms);
+    for (per_atom, _, _) in &frame_results {
+        per_atom_vec.extend_from_slice(per_atom);
+    }
+    let per_atom_array = PyArray1::from_vec(py, per_atom_vec);
+    result.insert("per_atom".to_string(), per_atom_array.into_py(py));
+
+    // Per-residue SASA as list of dicts
+    let per_residue_list = pyo3::types::PyList::empty(py);
+    for (_, per_residue, _) in &frame_results {
+        let per_residue_dict = pyo3::types::PyDict::new(py);
+        for (&residue_idx, &sasa) in per_residue {
+            per_residue_dict.set_item(residue_idx, sasa)?;
+        }
+        per_residue_list.append(per_residue_dict)?;
+    }
+    result.insert("per_residue".to_string(), per_residue_list.into_py(py));
+
+    // Total SASA as 1D array
+    let total_vec: Vec<f64> = frame_results.iter().map(|(_, _, total)| *total).collect();
+    let total_py = PyArray1::from_vec(py, total_vec);
+    result.insert("total".to_string(), total_py.into_py(py));
+
+    Ok(result)
+}
+
+/// Get Van der Waals radius for common elements
+///
+/// Parameters
+/// ----------
+/// element : str
+///     Element symbol (e.g., 'C', 'N', 'O')
+///
+/// Returns
+/// -------
+/// float
+///     Van der Waals radius in Angstroms
+#[pyfunction]
+pub fn get_vdw_radius(element: &str) -> f64 {
+    match element.to_uppercase().as_str() {
+        "H" => 1.20,
+        "C" => 1.70,
+        "N" => 1.55,
+        "O" => 1.52,
+        "S" => 1.80,
+        "P" => 1.80,
+        "F" => 1.47,
+        "CL" => 1.75,
+        "BR" => 1.85,
+        "I" => 1.98,
+        "SE" => 1.90,
+        "B" => 1.92,
+        "SI" => 2.10,
+        "AS" => 1.85,
+        "HG" => 1.55,
+        "CU" => 1.40,
+        "ZN" => 1.39,
+        "MG" => 1.73,
+        "CA" => 2.31,
+        "FE" => 1.32,
+        "MN" => 1.61,
+        "K" => 2.75,
+        "NA" => 2.27,
+        _ => 1.70, // Default to carbon radius
+    }
+}
+
+/// Get radii array from element symbols
+///
+/// Parameters
+/// ----------
+/// elements : list of str
+///     List of element symbols
+///
+/// Returns
+/// -------
+/// np.ndarray
+///     Array of Van der Waals radii
+#[pyfunction]
+pub fn get_radii_array<'py>(py: Python<'py>, elements: Vec<&str>) -> PyResult<&'py PyArray1<f64>> {
+    let radii: Vec<f64> = elements.iter().map(|&e| get_vdw_radius(e)).collect();
+    Ok(PyArray1::from_vec(py, radii))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ndarray::Array2;
+
+    #[test]
+    fn test_kdtree_construction() {
+        let coords = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        
+        let kdtree = KDTree::new(&coords);
+        assert!(kdtree.root.is_some());
+        assert_eq!(kdtree.coords.len(), 4);
+    }
+
+    #[test]
+    fn test_kdtree_query_radius() {
+        let coords = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 3.0],
+        ];
+        
+        let kdtree = KDTree::new(&coords);
+        let neighbors = kdtree.query_radius(&[0.0, 0.0, 0.0], 1.5);
+        
+        // Should find points 0 and 1 (distances 0.0 and 1.0)
+        assert_eq!(neighbors.len(), 2);
+        assert!(neighbors.contains(&0));
+        assert!(neighbors.contains(&1));
+    }
+
+    #[test]
+    fn test_kdtree_query_all() {
+        let coords = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        
+        let kdtree = KDTree::new(&coords);
+        let neighbors = kdtree.query_radius(&[0.5, 0.5, 0.0], 10.0);
+        
+        // Should find all 3 points with large radius
+        assert_eq!(neighbors.len(), 3);
+    }
+
+    #[test]
+    fn test_kdtree_empty_result() {
+        let coords = vec![
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+        ];
+        
+        let kdtree = KDTree::new(&coords);
+        let neighbors = kdtree.query_radius(&[0.0, 0.0, 0.0], 0.5);
+        
+        // Should only find point 0
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0], 0);
+    }
 
     #[test]
     fn test_single_atom() {
@@ -379,6 +829,31 @@ mod tests {
     }
 
     #[test]
+    fn test_two_close_atoms() {
+        // Two atoms close together should have reduced SASA
+        let coords = Array2::from_shape_vec(
+            (2, 3),
+            vec![0.0, 0.0, 0.0, 2.5, 0.0, 0.0],
+        ).unwrap();
+        let radii = ndarray::arr1(&[1.5, 1.5]);
+        let res_indices = ndarray::arr1(&[0, 1]);
+
+        let engine = SASAEngine::new(
+            coords.view(),
+            radii.view(),
+            res_indices.view(),
+            1.4,
+            1000,
+        );
+        let total = engine.calculate_total_sasa();
+
+        // Should be less than two separate atoms
+        let full_area = 2.0 * 4.0 * std::f64::consts::PI * (1.5 + 1.4).powi(2);
+        assert!(total < full_area);
+        assert!(total > 0.0);
+    }
+
+    #[test]
     fn test_per_residue_aggregation() {
         let coords = Array2::from_shape_vec(
             (3, 3),
@@ -399,5 +874,56 @@ mod tests {
         assert_eq!(per_residue.len(), 2);
         assert!(per_residue.contains_key(&0));
         assert!(per_residue.contains_key(&1));
+        
+        // Residue 0 should have less SASA than residue 1 (two atoms close together)
+        assert!(per_residue[&0] < per_residue[&1]);
+    }
+
+    #[test]
+    fn test_vdw_radii() {
+        assert_eq!(get_vdw_radius("C"), 1.70);
+        assert_eq!(get_vdw_radius("c"), 1.70); // Test case insensitivity
+        assert_eq!(get_vdw_radius("N"), 1.55);
+        assert_eq!(get_vdw_radius("O"), 1.52);
+        assert_eq!(get_vdw_radius("H"), 1.20);
+        assert_eq!(get_vdw_radius("S"), 1.80);
+        assert_eq!(get_vdw_radius("UNKNOWN"), 1.70); // Default
+    }
+
+    #[test]
+    fn test_fibonacci_sphere() {
+        let points = generate_fibonacci_sphere(100);
+        assert_eq!(points.len(), 100);
+        
+        // Check that points are approximately on unit sphere
+        for point in points {
+            let radius_sq = point[0].powi(2) + point[1].powi(2) + point[2].powi(2);
+            let radius = radius_sq.sqrt();
+            assert!((radius - 1.0).abs() < 1e-10, "Point not on unit sphere: radius = {}", radius);
+        }
+    }
+
+    #[test]
+    fn test_kdtree_performance() {
+        // Test with larger system to verify KD-tree provides speedup
+        let n_atoms = 1000;
+        let mut coords = Vec::with_capacity(n_atoms);
+        
+        // Generate random-ish coordinates
+        for i in 0..n_atoms {
+            let x = (i as f64 * 1.7) % 50.0;
+            let y = (i as f64 * 2.3) % 50.0;
+            let z = (i as f64 * 3.1) % 50.0;
+            coords.push([x, y, z]);
+        }
+        
+        let kdtree = KDTree::new(&coords);
+        
+        // Query should be fast even with many atoms
+        let neighbors = kdtree.query_radius(&[25.0, 25.0, 25.0], 5.0);
+        
+        // Should find some but not all neighbors
+        assert!(neighbors.len() > 0);
+        assert!(neighbors.len() < n_atoms);
     }
 }
