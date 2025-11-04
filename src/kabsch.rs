@@ -215,7 +215,5 @@ where
             rotation[[i, j]] = T::from(r[(i, j)]).unwrap();
         }
     }
-
     rotation
 }
-

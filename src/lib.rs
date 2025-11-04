@@ -1,8 +1,8 @@
 use pyo3::prelude::*;
 
 mod kabsch;
-mod wrapping;
 mod sasa;
+mod wrapping;
 
 /// A Python module implemented in Rust for fast Kabsch alignment and trajectory processing
 #[pymodule]

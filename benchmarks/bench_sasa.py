@@ -22,14 +22,17 @@ def rust(traj):
     
     # Simple uniform radii (for quick test)
     atoms = [atom.element.symbol for atom in traj.topology.atoms]
-    resids = np.array([atom.residue.index for atom in traj.topology.atoms], dtype=np.uint64)
+    resids = np.array([atom.residue.index for atom in traj.topology.atoms])
     
     n_points = 960
     
     radii = get_radii_array(atoms)
-    our_sasa = calculate_sasa_trajectory(coords.reshape(coords.shape[0], coords.shape[1] * 3), radii, resids, probe_radius=1.4, 
+    our_sasa = calculate_sasa_trajectory(coords, radii, resids, probe_radius=1.4, 
                                          n_sphere_points=n_points)
     
+    print(our_sasa['total'].shape)
+    print(our_sasa.keys())
+
 def python(traj):
     n_points = 960
     # MDTraj implementation
@@ -41,14 +44,15 @@ def python(traj):
 if __name__ == '__main__':
     rust_times = []
     python_times = []
-    for _ in range(100):
-        start = time.perf_counter()
-        rust(traj)
-        rust_times.append(time.perf_counter() - start)
-        
-        start = time.perf_counter()
-        python(traj)
-        python_times.append(time.perf_counter() - start)
+    print(rust(traj))
+    #for _ in range(100):
+    #    start = time.perf_counter()
+    #    rust(traj)
+    #    rust_times.append(time.perf_counter() - start)
+    #    
+    #    start = time.perf_counter()
+    #    python(traj)
+    #    python_times.append(time.perf_counter() - start)
 
-    df = pl.DataFrame({'rust': rust_times, 'python': python_times})
-    print(df.describe())
+    #df = pl.DataFrame({'rust': rust_times, 'python': python_times})
+    #print(df.describe())

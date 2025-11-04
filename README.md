@@ -56,13 +56,13 @@ unwrap_system(
     fragment_idx: np.ndarray     # int,   shape [n_atoms]
 ) -> np.ndarray                  # float, shape [n_frames, n_atoms, 3]
 
-calculate_sasa(
-    coordinates: np.ndarray,     # float, shape [n_frames, n_atoms, 3]
-    radii: np.ndarray,           # float, shape [n_atoms]
-    residue_indices: np.ndarray  # float, shape [n_atoms]
+calculate_sasa_trajectory(
+    coordinates: np.ndarray,     # np.float64, shape [n_frames, n_atoms, 3]
+    radii: list,                 # int, shape [n_atoms]
+    residue_indices: np.ndarray  # np.int64, shape [n_atoms]
     probe_radius: float=1.4      # float, default 1.4
     n_sphere_points: int=960     # int, default 960
-) -> dict[str, np.ndarray]       # dict, keys: ['per_atom', 'per_residue', 'total']
+) -> dict[str, np.ndarray]       # np.float64, keys ['total', 'per_atom', 'per_residue']
 
 ```
 
