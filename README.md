@@ -2,7 +2,6 @@
 
 [![CI/CD](https://github.com/msinclair-py/rust-simulation-tools/workflows/CI%2FCD/badge.svg)](https://github.com/msinclair-py/rust-simulation-tools/actions)
 [![PyPI version](https://img.shields.io/pypi/v/rust-simulation-tools)](https://pypi.org/project/rust-simulation-tools/)
-[![Python versions](https://img.shields.io/pypi/pyversions/rust-simulation-tools.svg)](https://pypi.org/project/rust-simulation-tools/)
 
 Fast, numerically stable MD trajectory processing implemented in Rust with a clean python API. 
 Installable via `pip`, integrates smoothly with MDAnalysis or mdtraj, and ships with tests.
