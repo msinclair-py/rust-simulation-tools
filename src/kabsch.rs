@@ -26,20 +26,20 @@ pub fn kabsch_align<'py>(
     align_indices: &Bound<'py, PyAny>,
 ) -> PyResult<PyObject> {
     // Convert indices to Vec<usize> from any integer array type
-    let indices: Vec<usize> =
-        if let Ok(idx_i64) = align_indices.extract::<PyReadonlyArray1<i64>>() {
-            idx_i64.as_array().iter().map(|&x| x as usize).collect()
-        } else if let Ok(idx_i32) = align_indices.extract::<PyReadonlyArray1<i32>>() {
-            idx_i32.as_array().iter().map(|&x| x as usize).collect()
-        } else if let Ok(idx_u64) = align_indices.extract::<PyReadonlyArray1<u64>>() {
-            idx_u64.as_array().iter().map(|&x| x as usize).collect()
-        } else if let Ok(idx_usize) = align_indices.extract::<PyReadonlyArray1<usize>>() {
-            idx_usize.as_array().to_vec()
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "align_indices must be an integer array",
-            ));
-        };
+    let indices: Vec<usize> = if let Ok(idx_i64) = align_indices.extract::<PyReadonlyArray1<i64>>()
+    {
+        idx_i64.as_array().iter().map(|&x| x as usize).collect()
+    } else if let Ok(idx_i32) = align_indices.extract::<PyReadonlyArray1<i32>>() {
+        idx_i32.as_array().iter().map(|&x| x as usize).collect()
+    } else if let Ok(idx_u64) = align_indices.extract::<PyReadonlyArray1<u64>>() {
+        idx_u64.as_array().iter().map(|&x| x as usize).collect()
+    } else if let Ok(idx_usize) = align_indices.extract::<PyReadonlyArray1<usize>>() {
+        idx_usize.as_array().to_vec()
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "align_indices must be an integer array",
+        ));
+    };
 
     // Check if input is float32 or float64 and dispatch accordingly
     if let Ok(traj_f32) = trajectory.extract::<PyReadonlyArray3<f32>>() {

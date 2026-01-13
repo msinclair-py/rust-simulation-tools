@@ -57,8 +57,8 @@ pub struct DcdReader {
 impl DcdReader {
     /// Open a DCD file for reading.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let file = File::open(path.as_ref())
-            .map_err(|e| format!("Failed to open DCD file: {}", e))?;
+        let file =
+            File::open(path.as_ref()).map_err(|e| format!("Failed to open DCD file: {}", e))?;
         let mut reader = BufReader::new(file);
         let header = read_dcd_header_internal(&mut reader)?;
 
@@ -106,7 +106,8 @@ impl DcdReader {
             ));
         }
 
-        let offset = self.header.first_frame_offset + (frame as u64) * (self.header.frame_size as u64);
+        let offset =
+            self.header.first_frame_offset + (frame as u64) * (self.header.frame_size as u64);
         self.reader
             .seek(SeekFrom::Start(offset))
             .map_err(|e| format!("Seek failed: {}", e))?;
@@ -116,7 +117,9 @@ impl DcdReader {
 
     /// Read all frames into memory.
     /// Returns (positions, box_info) where positions has shape (n_frames, n_atoms, 3).
-    pub fn read_all_frames(&mut self) -> Result<(Vec<Vec<[f64; 3]>>, Vec<Option<[f64; 6]>>), String> {
+    pub fn read_all_frames(
+        &mut self,
+    ) -> Result<(Vec<Vec<[f64; 3]>>, Vec<Option<[f64; 6]>>), String> {
         self.seek_frame(0)?;
 
         let mut all_positions = Vec::with_capacity(self.header.n_frames);
@@ -393,26 +396,23 @@ fn read_frame_internal<R: Read>(
 
     // Read X coordinates
     let _x_block = read_block_size(reader, is_big_endian)?;
-    let mut x_coords = vec![0f32; n_atoms];
-    for i in 0..n_atoms {
-        x_coords[i] = read_f32(reader)?;
-    }
+    let x_coords: Vec<f32> = (0..n_atoms)
+        .map(|_| read_f32(reader))
+        .collect::<Result<Vec<_>, _>>()?;
     let _x_end = read_block_size(reader, is_big_endian)?;
 
     // Read Y coordinates
     let _y_block = read_block_size(reader, is_big_endian)?;
-    let mut y_coords = vec![0f32; n_atoms];
-    for i in 0..n_atoms {
-        y_coords[i] = read_f32(reader)?;
-    }
+    let y_coords: Vec<f32> = (0..n_atoms)
+        .map(|_| read_f32(reader))
+        .collect::<Result<Vec<_>, _>>()?;
     let _y_end = read_block_size(reader, is_big_endian)?;
 
     // Read Z coordinates
     let _z_block = read_block_size(reader, is_big_endian)?;
-    let mut z_coords = vec![0f32; n_atoms];
-    for i in 0..n_atoms {
-        z_coords[i] = read_f32(reader)?;
-    }
+    let z_coords: Vec<f32> = (0..n_atoms)
+        .map(|_| read_f32(reader))
+        .collect::<Result<Vec<_>, _>>()?;
     let _z_end = read_block_size(reader, is_big_endian)?;
 
     // Combine into positions array (converting to nm)
@@ -435,8 +435,7 @@ fn read_frame_internal<R: Read>(
 
 /// Read the header from a DCD file.
 pub fn read_dcd_header<P: AsRef<Path>>(path: P) -> Result<DcdHeader, String> {
-    let file = File::open(path.as_ref())
-        .map_err(|e| format!("Failed to open DCD file: {}", e))?;
+    let file = File::open(path.as_ref()).map_err(|e| format!("Failed to open DCD file: {}", e))?;
     let mut reader = BufReader::new(file);
     read_dcd_header_internal(&mut reader)
 }
@@ -469,8 +468,7 @@ impl PyDcdReader {
     /// Open a DCD trajectory file.
     #[new]
     fn new(path: &str) -> PyResult<Self> {
-        let inner = DcdReader::open(path)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+        let inner = DcdReader::open(path).map_err(pyo3::exceptions::PyIOError::new_err)?;
         Ok(Self { inner })
     }
 
@@ -502,7 +500,7 @@ impl PyDcdReader {
     fn seek(&mut self, frame: usize) -> PyResult<()> {
         self.inner
             .seek_frame(frame)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+            .map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
     /// Read the next frame.
@@ -554,7 +552,7 @@ impl PyDcdReader {
     ) -> PyResult<(Bound<'py, PyArray2<f64>>, Option<Vec<f64>>)> {
         self.inner
             .seek_frame(frame)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         match self.inner.read_frame() {
             Ok(Some((positions, box_info))) => {
@@ -588,7 +586,7 @@ impl PyDcdReader {
         let (all_positions, all_boxes) = self
             .inner
             .read_all_frames()
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+            .map_err(pyo3::exceptions::PyIOError::new_err)?;
 
         let n_frames = all_positions.len();
         let n_atoms = self.inner.n_atoms();
@@ -601,9 +599,8 @@ impl PyDcdReader {
             }
         }
 
-        let arr = Array2::from_shape_vec((n_frames * n_atoms, 3), flat).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Shape error: {}", e))
-        })?;
+        let arr = Array2::from_shape_vec((n_frames * n_atoms, 3), flat)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Shape error: {}", e)))?;
 
         let py_arr = PyArray2::from_owned_array_bound(py, arr);
         let py_boxes: Vec<Option<Vec<f64>>> = all_boxes
@@ -629,8 +626,7 @@ impl PyDcdReader {
 #[pyfunction]
 #[pyo3(name = "read_dcd_header")]
 pub fn read_dcd_header_py(path: &str) -> PyResult<pyo3::Py<pyo3::types::PyDict>> {
-    let header = read_dcd_header(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+    let header = read_dcd_header(path).map_err(pyo3::exceptions::PyIOError::new_err)?;
 
     Python::with_gil(|py| {
         let dict = pyo3::types::PyDict::new_bound(py);

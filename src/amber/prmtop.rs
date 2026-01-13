@@ -71,9 +71,7 @@ impl AmberTopology {
             } else {
                 self.n_atoms
             };
-            for atom_idx in start..end {
-                result[atom_idx] = res_idx;
-            }
+            result[start..end].fill(res_idx);
         }
         result
     }
@@ -120,8 +118,8 @@ impl PrmtopParser {
 
     /// Parse the prmtop file and extract all sections.
     fn parse_file<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
-        let file = File::open(path.as_ref())
-            .map_err(|e| format!("Failed to open prmtop file: {}", e))?;
+        let file =
+            File::open(path.as_ref()).map_err(|e| format!("Failed to open prmtop file: {}", e))?;
         let reader = BufReader::new(file);
 
         let mut current_flag: Option<String> = None;
@@ -130,14 +128,14 @@ impl PrmtopParser {
         for line in reader.lines() {
             let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
 
-            if line.starts_with("%FLAG") {
+            if let Some(flag_content) = line.strip_prefix("%FLAG") {
                 // Save previous section if any
                 if let Some(flag) = current_flag.take() {
                     self.sections.insert(flag, current_data);
                     current_data = Vec::new();
                 }
                 // Extract flag name
-                let flag_name = line[5..].trim().to_string();
+                let flag_name = flag_content.trim().to_string();
                 current_flag = Some(flag_name);
             } else if line.starts_with("%FORMAT") {
                 // Skip format line, we'll parse dynamically
@@ -443,7 +441,6 @@ impl PyAmberTopology {
 #[pyfunction]
 #[pyo3(name = "read_prmtop")]
 pub fn read_prmtop_py(path: &str) -> PyResult<PyAmberTopology> {
-    let topo = parse_prmtop(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+    let topo = parse_prmtop(path).map_err(pyo3::exceptions::PyIOError::new_err)?;
     Ok(PyAmberTopology { inner: topo })
 }

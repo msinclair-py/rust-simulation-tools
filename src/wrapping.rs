@@ -154,21 +154,21 @@ where
             // Update cumulative shifts using minimum image convention
             // Wrapped backward (crossed right boundary)
             if delta_x > half_box[0] {
-                shifts_x[atom_idx] = shifts_x[atom_idx] - box_dims[0];
+                shifts_x[atom_idx] -= box_dims[0];
             } else if delta_x < -half_box[0] {
-                shifts_x[atom_idx] = shifts_x[atom_idx] + box_dims[0];
+                shifts_x[atom_idx] += box_dims[0];
             }
 
             if delta_y > half_box[1] {
-                shifts_y[atom_idx] = shifts_y[atom_idx] - box_dims[1];
+                shifts_y[atom_idx] -= box_dims[1];
             } else if delta_y < -half_box[1] {
-                shifts_y[atom_idx] = shifts_y[atom_idx] + box_dims[1];
+                shifts_y[atom_idx] += box_dims[1];
             }
 
             if delta_z > half_box[2] {
-                shifts_z[atom_idx] = shifts_z[atom_idx] - box_dims[2];
+                shifts_z[atom_idx] -= box_dims[2];
             } else if delta_z < -half_box[2] {
-                shifts_z[atom_idx] = shifts_z[atom_idx] + box_dims[2];
+                shifts_z[atom_idx] += box_dims[2];
             }
 
             // Store unwrapped coordinates (all 3 together for cache efficiency)

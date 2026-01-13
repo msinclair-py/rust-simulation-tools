@@ -54,8 +54,7 @@ impl ReactionFieldParams {
         let c_rf = (3.0 * eps) / ((2.0 * eps + 1.0) * r_c);
 
         // Pre-compute the outer constant term (without charges)
-        let prefactor =
-            COULOMB_CONSTANT * ELEMENTARY_CHARGE.powi(2) * AVOGADRO / 1000.0; // J to kJ
+        let prefactor = COULOMB_CONSTANT * ELEMENTARY_CHARGE.powi(2) * AVOGADRO / 1000.0; // J to kJ
 
         Self {
             k_rf,
@@ -255,7 +254,9 @@ fn compute_residue_energy(
             let eps_i = residue.epsilons[i];
 
             // Get only binder atoms in neighboring cells
-            binder.cell_list.get_neighbors_into(pos_i, &mut neighbor_buffer);
+            binder
+                .cell_list
+                .get_neighbors_into(pos_i, &mut neighbor_buffer);
 
             for &j in neighbor_buffer.iter() {
                 let pos_j = &binder.positions[j];
@@ -309,7 +310,8 @@ fn compute_fingerprints_internal(
     let n_residues = resmap_offsets.len() - 1;
 
     // Get cached reaction field parameters
-    let (k_rf, c_rf, prefactor) = RF_PARAMS.with(|params| (params.k_rf, params.c_rf, params.prefactor));
+    let (k_rf, c_rf, prefactor) =
+        RF_PARAMS.with(|params| (params.k_rf, params.c_rf, params.prefactor));
 
     // Build binder data with cell list (done once)
     let binder = BinderData::new(positions, charges, sigmas, epsilons, binder_indices);
@@ -320,7 +322,15 @@ fn compute_fingerprints_internal(
         .map(|res_idx| {
             let start = resmap_offsets[res_idx] as usize;
             let end = resmap_offsets[res_idx + 1] as usize;
-            ResidueData::new(positions, charges, sigmas, epsilons, resmap_indices, start, end)
+            ResidueData::new(
+                positions,
+                charges,
+                sigmas,
+                epsilons,
+                resmap_indices,
+                start,
+                end,
+            )
         })
         .collect();
 

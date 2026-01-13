@@ -47,11 +47,7 @@ impl KDTree {
     }
 
     /// Recursively build the KD-tree
-    fn build_tree(
-        coords: &[[f64; 3]],
-        indices: &mut [usize],
-        depth: usize,
-    ) -> Option<Box<KDNode>> {
+    fn build_tree(coords: &[[f64; 3]], indices: &mut [usize], depth: usize) -> Option<Box<KDNode>> {
         if indices.is_empty() {
             return None;
         }
@@ -209,7 +205,8 @@ impl SASAEngine {
         let kdtree = KDTree::new(&coords);
 
         // Cache maximum extended radius (computed once, not per atom)
-        let max_extended_radius = radii.iter().copied().fold(0.0f64, |a, b| a.max(b)) + probe_radius;
+        let max_extended_radius =
+            radii.iter().copied().fold(0.0f64, |a, b| a.max(b)) + probe_radius;
 
         SASAEngine {
             coords,
@@ -235,7 +232,8 @@ impl SASAEngine {
         let search_radius = extended_radius + self.max_extended_radius;
 
         // Get potential neighbors using KD-tree (reuses buffer)
-        self.kdtree.query_radius_into(atom_coord, search_radius, neighbors);
+        self.kdtree
+            .query_radius_into(atom_coord, search_radius, neighbors);
 
         // Count accessible points (sequential - no nested parallelism)
         // This is faster for typical sphere point counts (< 1000)
@@ -372,7 +370,13 @@ pub fn calculate_sasa(
     let res_indices = numpy::ndarray::ArrayView1::from(&res_indices_vec);
 
     // Create engine and calculate
-    let engine = SASAEngine::new(coords, radii_arr, res_indices, probe_radius, n_sphere_points);
+    let engine = SASAEngine::new(
+        coords,
+        radii_arr,
+        res_indices,
+        probe_radius,
+        n_sphere_points,
+    );
 
     let per_atom = engine.calculate_per_atom_sasa();
     let per_residue = engine.calculate_per_residue_sasa();
@@ -467,7 +471,13 @@ pub fn calculate_residue_sasa(
     let res_indices_vec = res_indices_vec?;
     let res_indices = numpy::ndarray::ArrayView1::from(&res_indices_vec);
 
-    let engine = SASAEngine::new(coords, radii_arr, res_indices, probe_radius, n_sphere_points);
+    let engine = SASAEngine::new(
+        coords,
+        radii_arr,
+        res_indices,
+        probe_radius,
+        n_sphere_points,
+    );
     Ok(engine.calculate_per_residue_sasa())
 }
 
@@ -609,8 +619,13 @@ pub fn calculate_sasa_trajectory<'py>(
             // Extract frame coordinates directly from 3D array
             let frame_coords = traj.slice(numpy::ndarray::s![frame_idx, .., ..]);
 
-            let engine =
-                SASAEngine::new(frame_coords, radii_arr, res_indices, probe_radius, n_sphere_points);
+            let engine = SASAEngine::new(
+                frame_coords,
+                radii_arr,
+                res_indices,
+                probe_radius,
+                n_sphere_points,
+            );
 
             let per_atom = engine.calculate_per_atom_sasa();
             let per_residue = engine.calculate_per_residue_sasa();

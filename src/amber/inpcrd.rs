@@ -103,10 +103,8 @@ pub fn parse_inpcrd<P: AsRef<Path>>(path: P) -> Result<AmberCoordinates, String>
 
         if values.len() >= n_values_needed {
             // Check for box dimensions in next line
-            if let Some(box_line_result) = lines.next() {
-                if let Ok(box_line) = box_line_result {
-                    pending_box_line = Some(box_line);
-                }
+            if let Some(Ok(box_line)) = lines.next() {
+                pending_box_line = Some(box_line);
             }
             break;
         }
@@ -131,10 +129,8 @@ pub fn parse_inpcrd<P: AsRef<Path>>(path: P) -> Result<AmberCoordinates, String>
                 Some([90.0, 90.0, 90.0])
             };
 
-            let positions: Vec<[f64; 3]> = values
-                .chunks_exact(3)
-                .map(|c| [c[0], c[1], c[2]])
-                .collect();
+            let positions: Vec<[f64; 3]> =
+                values.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
 
             return Ok(AmberCoordinates {
                 n_atoms,
@@ -154,10 +150,7 @@ pub fn parse_inpcrd<P: AsRef<Path>>(path: P) -> Result<AmberCoordinates, String>
     }
 
     // Build positions array
-    let positions: Vec<[f64; 3]> = values
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
+    let positions: Vec<[f64; 3]> = values.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
 
     Ok(AmberCoordinates {
         n_atoms,
@@ -190,8 +183,7 @@ pub fn read_inpcrd_py<'py>(
     py: Python<'py>,
     path: &str,
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Option<Vec<f64>>)> {
-    let coords =
-        parse_inpcrd(path).map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+    let coords = parse_inpcrd(path).map_err(pyo3::exceptions::PyIOError::new_err)?;
 
     // Convert to 2D array
     let n_atoms = coords.n_atoms;

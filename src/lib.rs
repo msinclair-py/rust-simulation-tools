@@ -1,3 +1,10 @@
+// Allow complex types in PyO3 return signatures (necessary for Python bindings)
+#![allow(clippy::type_complexity)]
+// PyResult conversions are required by PyO3, not useless
+#![allow(clippy::useless_conversion)]
+// Some FFI functions require many arguments
+#![allow(clippy::too_many_arguments)]
+
 use pyo3::prelude::*;
 
 mod amber;

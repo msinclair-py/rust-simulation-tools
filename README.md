@@ -3,8 +3,7 @@
 [![CI/CD](https://github.com/msinclair-py/rust-simulation-tools/workflows/CI%2FCD/badge.svg)](https://github.com/msinclair-py/rust-simulation-tools/actions)
 [![PyPI version](https://img.shields.io/pypi/v/rust-simulation-tools)](https://pypi.org/project/rust-simulation-tools/)
 
-Fast, numerically stable MD trajectory processing implemented in Rust with a clean python API. 
-Installable via `pip`, integrates smoothly with MDAnalysis or mdtraj, and ships with tests.
+Fast MD trajectory processing and analysis in Rust with a Python API.
 
 ## Installation
 
@@ -14,74 +13,91 @@ pip install rust-simulation-tools
 
 ## Features
 
-- ⚡ **Fast**: Rust implementation with SIMD optimizations
-- 🎯 **Accurate**: Numerically stable Kabsch alignment and fragment-based unwrapping
-- 🧪 **Well tested**: Comprehensive test suite with >80% coverage
-- 🧩 **Easy integration**: Works directly with MDAnalysis selections/indices
+- Kabsch alignment with SIMD optimizations
+- Fragment-based periodic boundary unwrapping
+- SASA calculation (Shrake-Rupley with KD-tree acceleration)
+- Interaction energy fingerprinting (LJ + electrostatic)
+- AMBER file readers (prmtop, inpcrd)
+- DCD trajectory reader with streaming support
 
-## Usage
+## Quick Examples
+
+### Trajectory Alignment
 
 ```python
-import MDAnalysis as mda
 from rust_simulation_tools import kabsch_align
 
-# Load trajectory
-u = mda.Universe("topology.pdb", "trajectory.dcd")
-
-# Select alignment atoms
-align_selection = u.select_atoms("backbone")
-align_indices = align_selection.indices.astype(np.int32)
-
-# Get coordinates
-reference = u.atoms.positions.copy().astype(np.float32)
-trajectory = np.array([ts.positions for ts in u.trajectory], dtype=np.float32)
-
-# Align
 aligned = kabsch_align(trajectory, reference, align_indices)
+```
+
+### SASA Calculation
+
+```python
+from rust_simulation_tools import calculate_sasa, get_radii_array
+
+radii = get_radii_array(elements)  # ['C', 'N', 'O', ...]
+result = calculate_sasa(coords, radii, residue_indices)
+# result['total'], result['per_atom'], result['per_residue']
+```
+
+### AMBER Topology + DCD Trajectory
+
+```python
+from rust_simulation_tools import read_prmtop, DcdReader
+
+topo = read_prmtop("system.prmtop")
+charges, sigmas, epsilons = topo.charges(), topo.sigmas(), topo.epsilons()
+
+dcd = DcdReader("trajectory.dcd")
+for i in range(dcd.n_frames):
+    coords, box = dcd.read_frame()
+```
+
+### Interaction Fingerprints
+
+```python
+from rust_simulation_tools import compute_fingerprints, read_prmtop
+
+topo = read_prmtop("system.prmtop")
+resmap_indices, resmap_offsets = topo.build_resmap()
+
+lj_fp, es_fp = compute_fingerprints(
+    positions, topo.charges(), topo.sigmas(), topo.epsilons(),
+    resmap_indices, resmap_offsets, binder_indices
+)
 ```
 
 ## API Reference
 
 ```python
-kabsch_align(
-    trajectory: np.ndarray,      # float, shape [n_frames, n_atoms, 3]
-    reference: np.ndarray,       # float, shape [n_atoms, 3]
-    align_idx: np.ndarray        # int,   shape [n_alignment_atoms]
-) -> np.ndarray                  # float, shape [n_frames, n_atoms, 3]
+# Alignment & unwrapping
+kabsch_align(trajectory, reference, align_idx) -> aligned_trajectory
+unwrap_system(trajectory, box_dimensions, fragment_idx) -> unwrapped_trajectory
 
-unwrap_system(
-    trajectory: np.ndarray,      # float, shape [n_frames, n_atoms, 3]
-    box_dimensions: np.ndarray,  # float, shape [n_frames, 3]
-    fragment_idx: np.ndarray     # int,   shape [n_atoms]
-) -> np.ndarray                  # float, shape [n_frames, n_atoms, 3]
+# SASA
+calculate_sasa(coords, radii, residue_indices, probe_radius=1.4) -> dict
+calculate_sasa_trajectory(trajectory, radii, residue_indices) -> dict
+calculate_total_sasa(coords, radii, probe_radius=1.4) -> float
+get_vdw_radius(element) -> float
+get_radii_array(elements) -> np.ndarray
 
-calculate_sasa_trajectory(
-    coordinates: np.ndarray,     # np.float64, shape [n_frames, n_atoms, 3]
-    radii: list,                 # int, shape [n_atoms]
-    residue_indices: np.ndarray  # np.int64, shape [n_atoms]
-    probe_radius: float=1.4      # float, default 1.4
-    n_sphere_points: int=960     # int, default 960
-) -> dict[str, np.ndarray]       # np.float64, keys ['total', 'per_atom', 'per_residue']
+# Fingerprinting
+compute_fingerprints(positions, charges, sigmas, epsilons,
+                     resmap_indices, resmap_offsets, binder_indices) -> (lj, es)
 
+# File I/O
+read_prmtop(path) -> AmberTopology
+read_inpcrd(path) -> (positions, box_dimensions)
+DcdReader(path)   # .n_frames, .n_atoms, .read_frame(), .seek(n), .read_all()
 ```
 
 ## Development
 
 ```bash
-# Clone repository
 git clone https://github.com/msinclair-py/rust-simulation-tools.git
 cd rust-simulation-tools
-
-# Install development dependencies
 pip install maturin pytest pytest-cov numpy
-
-# Build and install in development mode
 maturin develop --release
-
-# Install with pip
-pip install target/wheels/name-of-package.whl
-
-# Run tests
 pytest tests/ -v --cov
 ```
 
