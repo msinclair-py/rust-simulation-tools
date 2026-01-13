@@ -1,6 +1,7 @@
-use ndarray::{s, Array2, ArrayView2, Axis};
+use numpy::ndarray::{Array1, Array2, ArrayView2, Axis};
 use numpy::{PyArray3, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 
 /// Align MD trajectory frames to a reference structure using Kabsch algorithm
 ///
@@ -18,27 +19,27 @@ use pyo3::prelude::*;
 /// aligned : ndarray (num_frames, num_atoms, 3)
 ///     Aligned trajectory coordinates (same dtype as input)
 #[pyfunction]
-pub fn kabsch_align(
-    py: Python,
-    trajectory: &PyAny,
-    reference: &PyAny,
-    align_indices: &PyAny,
+pub fn kabsch_align<'py>(
+    py: Python<'py>,
+    trajectory: &Bound<'py, PyAny>,
+    reference: &Bound<'py, PyAny>,
+    align_indices: &Bound<'py, PyAny>,
 ) -> PyResult<PyObject> {
     // Convert indices to Vec<usize> from any integer array type
-    let indices: Vec<usize> = if let Ok(idx_i64) = align_indices.extract::<PyReadonlyArray1<i64>>()
-    {
-        idx_i64.as_array().iter().map(|&x| x as usize).collect()
-    } else if let Ok(idx_i32) = align_indices.extract::<PyReadonlyArray1<i32>>() {
-        idx_i32.as_array().iter().map(|&x| x as usize).collect()
-    } else if let Ok(idx_u64) = align_indices.extract::<PyReadonlyArray1<u64>>() {
-        idx_u64.as_array().iter().map(|&x| x as usize).collect()
-    } else if let Ok(idx_usize) = align_indices.extract::<PyReadonlyArray1<usize>>() {
-        idx_usize.as_array().to_vec()
-    } else {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "align_indices must be an integer array",
-        ));
-    };
+    let indices: Vec<usize> =
+        if let Ok(idx_i64) = align_indices.extract::<PyReadonlyArray1<i64>>() {
+            idx_i64.as_array().iter().map(|&x| x as usize).collect()
+        } else if let Ok(idx_i32) = align_indices.extract::<PyReadonlyArray1<i32>>() {
+            idx_i32.as_array().iter().map(|&x| x as usize).collect()
+        } else if let Ok(idx_u64) = align_indices.extract::<PyReadonlyArray1<u64>>() {
+            idx_u64.as_array().iter().map(|&x| x as usize).collect()
+        } else if let Ok(idx_usize) = align_indices.extract::<PyReadonlyArray1<usize>>() {
+            idx_usize.as_array().to_vec()
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "align_indices must be an integer array",
+            ));
+        };
 
     // Check if input is float32 or float64 and dispatch accordingly
     if let Ok(traj_f32) = trajectory.extract::<PyReadonlyArray3<f32>>() {
@@ -47,16 +48,16 @@ pub fn kabsch_align(
                 "trajectory and reference must have the same dtype (both float32 or both float64)",
             )
         })?;
-        let result = kabsch_align_generic(py, traj_f32, ref_f32, &indices)?;
-        Ok(result.to_object(py))
+        let result = kabsch_align_parallel(py, traj_f32, ref_f32, &indices)?;
+        Ok(result.into_any().unbind())
     } else if let Ok(traj_f64) = trajectory.extract::<PyReadonlyArray3<f64>>() {
         let ref_f64 = reference.extract::<PyReadonlyArray2<f64>>().map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "trajectory and reference must have the same dtype (both float32 or both float64)",
             )
         })?;
-        let result = kabsch_align_generic(py, traj_f64, ref_f64, &indices)?;
-        Ok(result.to_object(py))
+        let result = kabsch_align_parallel(py, traj_f64, ref_f64, &indices)?;
+        Ok(result.into_any().unbind())
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "trajectory must be float32 or float64 array",
@@ -64,156 +65,193 @@ pub fn kabsch_align(
     }
 }
 
-/// Generic implementation that works with both f32 and f64
-fn kabsch_align_generic<'py, T>(
+/// Parallelized Kabsch alignment implementation
+fn kabsch_align_parallel<'py, T>(
     py: Python<'py>,
-    trajectory: PyReadonlyArray3<T>,
-    reference: PyReadonlyArray2<T>,
+    trajectory: PyReadonlyArray3<'py, T>,
+    reference: PyReadonlyArray2<'py, T>,
     align_indices: &[usize],
-) -> PyResult<&'py PyArray3<T>>
+) -> PyResult<Bound<'py, PyArray3<T>>>
 where
-    T: numpy::Element + ndarray::NdFloat,
+    T: numpy::Element + numpy::ndarray::NdFloat + Send + Sync,
 {
     let traj = trajectory.as_array();
     let ref_coords = reference.as_array();
 
     let num_frames = traj.shape()[0];
     let num_atoms = traj.shape()[1];
-    let num_align = align_indices.len();
+    let _num_align = align_indices.len();
 
-    // Extract alignment atoms from reference
-    let mut ref_align = Array2::<T>::zeros((num_align, 3));
-    for (i, &idx) in align_indices.iter().enumerate() {
-        for j in 0..3 {
-            ref_align[[i, j]] = ref_coords[[idx, j]];
-        }
-    }
+    // Pre-extract alignment atoms from reference (done once)
+    let ref_align: Vec<[f64; 3]> = align_indices
+        .iter()
+        .map(|&idx| {
+            [
+                ref_coords[[idx, 0]].to_f64().unwrap(),
+                ref_coords[[idx, 1]].to_f64().unwrap(),
+                ref_coords[[idx, 2]].to_f64().unwrap(),
+            ]
+        })
+        .collect();
 
     // Calculate reference centroid once
-    let ref_centroid = centroid_generic(&ref_align.view());
+    let ref_centroid = compute_centroid(&ref_align);
 
-    // Allocate output array
-    let mut aligned_data = Vec::with_capacity(num_frames * num_atoms * 3);
+    // Pre-center reference alignment atoms
+    let ref_centered: Vec<[f64; 3]> = ref_align
+        .iter()
+        .map(|p| {
+            [
+                p[0] - ref_centroid[0],
+                p[1] - ref_centroid[1],
+                p[2] - ref_centroid[2],
+            ]
+        })
+        .collect();
 
-    // Process each frame
-    for frame_idx in 0..num_frames {
-        let frame = traj.slice(s![frame_idx, .., ..]);
+    // Process frames in parallel
+    let results: Vec<Vec<T>> = (0..num_frames)
+        .into_par_iter()
+        .map(|frame_idx| {
+            // Extract alignment atoms from current frame
+            let mobile_align: Vec<[f64; 3]> = align_indices
+                .iter()
+                .map(|&idx| {
+                    [
+                        traj[[frame_idx, idx, 0]].to_f64().unwrap(),
+                        traj[[frame_idx, idx, 1]].to_f64().unwrap(),
+                        traj[[frame_idx, idx, 2]].to_f64().unwrap(),
+                    ]
+                })
+                .collect();
 
-        // Extract alignment atoms from current frame
-        let mut mobile_align = Array2::<T>::zeros((num_align, 3));
-        for (i, &idx) in align_indices.iter().enumerate() {
-            for j in 0..3 {
-                mobile_align[[i, j]] = frame[[idx, j]];
+            // Calculate mobile centroid
+            let mobile_centroid = compute_centroid(&mobile_align);
+
+            // Compute rotation matrix using Kabsch algorithm
+            let rotation = compute_kabsch_rotation(&mobile_align, &mobile_centroid, &ref_centered);
+
+            // Apply alignment to ALL atoms in the frame
+            let mut frame_result = Vec::with_capacity(num_atoms * 3);
+
+            for atom_idx in 0..num_atoms {
+                // Get atom coordinates and center on mobile centroid
+                let centered = [
+                    traj[[frame_idx, atom_idx, 0]].to_f64().unwrap() - mobile_centroid[0],
+                    traj[[frame_idx, atom_idx, 1]].to_f64().unwrap() - mobile_centroid[1],
+                    traj[[frame_idx, atom_idx, 2]].to_f64().unwrap() - mobile_centroid[2],
+                ];
+
+                // Apply rotation (manually unrolled 3x3 matrix multiply)
+                let rotated = [
+                    rotation[0][0] * centered[0]
+                        + rotation[0][1] * centered[1]
+                        + rotation[0][2] * centered[2],
+                    rotation[1][0] * centered[0]
+                        + rotation[1][1] * centered[1]
+                        + rotation[1][2] * centered[2],
+                    rotation[2][0] * centered[0]
+                        + rotation[2][1] * centered[1]
+                        + rotation[2][2] * centered[2],
+                ];
+
+                // Translate to reference centroid and store
+                frame_result.push(T::from(rotated[0] + ref_centroid[0]).unwrap());
+                frame_result.push(T::from(rotated[1] + ref_centroid[1]).unwrap());
+                frame_result.push(T::from(rotated[2] + ref_centroid[2]).unwrap());
             }
-        }
 
-        // Calculate mobile centroid
-        let mobile_centroid = centroid_generic(&mobile_align.view());
+            frame_result
+        })
+        .collect();
 
-        // Compute rotation matrix
-        let rotation = kabsch_generic(&mobile_align.view(), &ref_align.view());
+    // Flatten results into output array
+    let aligned_data: Vec<T> = results.into_iter().flatten().collect();
 
-        // Apply alignment to ALL atoms in the frame
-        for atom_idx in 0..num_atoms {
-            // Get atom coordinates
-            let atom_coords = [
-                frame[[atom_idx, 0]],
-                frame[[atom_idx, 1]],
-                frame[[atom_idx, 2]],
-            ];
-
-            // Step 1: Center on mobile centroid
-            let mut centered = atom_coords;
-            for j in 0..3 {
-                centered[j] -= mobile_centroid[[0, j]];
-            }
-
-            // Step 2: Apply rotation (matrix-vector multiplication)
-            let mut rotated = [T::zero(); 3];
-            for i in 0..3 {
-                for j in 0..3 {
-                    rotated[i] += rotation[[i, j]] * centered[j];
-                }
-            }
-
-            // Step 3: Translate to reference centroid
-            for j in 0..3 {
-                rotated[j] += ref_centroid[[0, j]];
-            }
-
-            // Store in output
-            aligned_data.extend_from_slice(&rotated);
-        }
-    }
-
-    // Convert to ndarray and reshape
-    let aligned_array = Array2::from_shape_vec((num_frames * num_atoms, 3), aligned_data)
-        .expect("Failed to create array from aligned data");
-    let aligned_3d = aligned_array
+    let aligned_array = Array1::from_vec(aligned_data)
         .into_shape((num_frames, num_atoms, 3))
         .expect("Failed to reshape to 3D");
 
-    Ok(PyArray3::from_owned_array(py, aligned_3d))
+    Ok(PyArray3::from_owned_array_bound(py, aligned_array))
 }
 
-/// Generic centroid function
-fn centroid_generic<T>(coords: &ArrayView2<T>) -> Array2<T>
-where
-    T: ndarray::NdFloat,
-{
-    let n = T::from(coords.nrows()).unwrap();
-    let sum = coords.sum_axis(Axis(0));
-    sum.insert_axis(Axis(0)) / n
+/// Compute centroid of a set of 3D points
+#[inline]
+fn compute_centroid(points: &[[f64; 3]]) -> [f64; 3] {
+    let n = points.len() as f64;
+    let mut sum = [0.0; 3];
+    for p in points {
+        sum[0] += p[0];
+        sum[1] += p[1];
+        sum[2] += p[2];
+    }
+    [sum[0] / n, sum[1] / n, sum[2] / n]
 }
 
-/// Generic Kabsch algorithm
-fn kabsch_generic<T>(mobile: &ArrayView2<T>, reference: &ArrayView2<T>) -> Array2<T>
-where
-    T: ndarray::NdFloat,
-{
-    // Center both coordinate sets
-    let mobile_center = centroid_generic(mobile);
-    let ref_center = centroid_generic(reference);
+/// Compute Kabsch rotation matrix
+/// Takes mobile points, mobile centroid, and pre-centered reference points
+#[inline]
+fn compute_kabsch_rotation(
+    mobile: &[[f64; 3]],
+    mobile_centroid: &[f64; 3],
+    ref_centered: &[[f64; 3]],
+) -> [[f64; 3]; 3] {
+    // Compute covariance matrix H = mobile_centered^T * ref_centered
+    let mut h = [[0.0f64; 3]; 3];
+    let n = mobile.len();
 
-    let mobile_centered = mobile.to_owned() - &mobile_center;
-    let ref_centered = reference.to_owned() - &ref_center;
+    for k in 0..n {
+        let m_centered = [
+            mobile[k][0] - mobile_centroid[0],
+            mobile[k][1] - mobile_centroid[1],
+            mobile[k][2] - mobile_centroid[2],
+        ];
 
-    // Compute covariance matrix H = mobile^T * reference
-    let h = mobile_centered.t().dot(&ref_centered);
-
-    // Convert to nalgebra for SVD (always use f64 for numerical stability)
-    let mut mat = nalgebra::Matrix3::<f64>::zeros();
-    for i in 0..3 {
-        for j in 0..3 {
-            mat[(i, j)] = h[[i, j]].to_f64().unwrap();
+        // Outer product contribution to H
+        for i in 0..3 {
+            for j in 0..3 {
+                h[i][j] += m_centered[i] * ref_centered[k][j];
+            }
         }
     }
 
+    // Convert to nalgebra for SVD
+    let mat = nalgebra::Matrix3::new(
+        h[0][0], h[0][1], h[0][2], h[1][0], h[1][1], h[1][2], h[2][0], h[2][1], h[2][2],
+    );
+
     let svd = nalgebra::SVD::new(mat, true, true);
-    let u_na = svd.u.unwrap();
-    let v_t_na = svd.v_t.unwrap();
+    let u = svd.u.unwrap();
+    let v_t = svd.v_t.unwrap();
 
     // Compute rotation matrix R = V * U^T
-    let v = v_t_na.transpose();
-    let mut r = v * u_na.transpose();
+    let v = v_t.transpose();
+    let mut r = v * u.transpose();
 
     // Ensure proper rotation (det(R) = 1, not reflection)
-    let det = r.determinant();
-
-    if det < 0.0 {
+    if r.determinant() < 0.0 {
         let mut v_corrected = v;
         for i in 0..3 {
             v_corrected[(i, 2)] *= -1.0;
         }
-        r = v_corrected * u_na.transpose();
+        r = v_corrected * u.transpose();
     }
 
-    // Convert back to ndarray and original type T
-    let mut rotation = Array2::<T>::zeros((3, 3));
-    for i in 0..3 {
-        for j in 0..3 {
-            rotation[[i, j]] = T::from(r[(i, j)]).unwrap();
-        }
-    }
-    rotation
+    // Convert back to array
+    [
+        [r[(0, 0)], r[(0, 1)], r[(0, 2)]],
+        [r[(1, 0)], r[(1, 1)], r[(1, 2)]],
+        [r[(2, 0)], r[(2, 1)], r[(2, 2)]],
+    ]
+}
+
+/// Generic centroid function for ndarray (kept for compatibility)
+#[allow(dead_code)]
+fn centroid_generic<T>(coords: &ArrayView2<T>) -> Array2<T>
+where
+    T: numpy::ndarray::NdFloat,
+{
+    let n = T::from(coords.nrows()).unwrap();
+    let sum = coords.sum_axis(Axis(0));
+    sum.insert_axis(Axis(0)) / n
 }

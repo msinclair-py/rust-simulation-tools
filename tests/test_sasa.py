@@ -1,390 +1,347 @@
-#!/usr/bin/env python3
-"""
-Standalone test for SASA calculation with KD-tree optimization
-Run this to verify the implementation works correctly
-"""
+"""Tests for SASA (Solvent Accessible Surface Area) calculations."""
 
 import numpy as np
-import sys
 import pytest
-
-def test_imports():
-    """Test that all functions can be imported"""
-    print("Testing imports...")
-    try:
-        from rust_simulation_tools import (
-            calculate_sasa,
-            calculate_residue_sasa,
-            calculate_total_sasa,
-            calculate_sasa_trajectory,
-            get_vdw_radius,
-            get_radii_array,
-        )
-        print("  ✓ All functions imported successfully")
-    except ImportError as e:
-        pytest.fail(f"Import error: {e}")
+from rust_simulation_tools import (
+    calculate_sasa,
+    calculate_residue_sasa,
+    calculate_total_sasa,
+    calculate_sasa_trajectory,
+    get_vdw_radius,
+    get_radii_array,
+)
 
 
-def test_single_atom_sasa():
-    """Test SASA of a single isolated atom"""
-    print("\nTest 1: Single Atom SASA")
-    print("-" * 40)
-    
-    from rust_simulation_tools import calculate_sasa, get_vdw_radius
-    
-    # Single carbon atom at origin
-    coords = np.array([[0.0, 0.0, 0.0]])
-    radii = np.array([get_vdw_radius('C')])  # 1.7 Å
-    residue_indices = np.array([0])  # Must be unsigned
-    
-    result = calculate_sasa(coords, radii, residue_indices)
-    
-    # Analytical result: 4π(1.7 + 1.4)² = 4π(3.1)² ≈ 120.76 Ų
-    expected = 4 * np.pi * (1.7 + 1.4)**2
-    error = abs(result['total'] - expected) / expected * 100
-    
-    print(f"  Expected: {expected:.2f} Ų")
-    print(f"  Calculated: {result['total']:.2f} Ų")
-    print(f"  Error: {error:.2f}%")
-    
-    assert error < 5.0, f"Error too large: {error:.2f}%"
-    print("  ✓ PASS: Within 5% of expected value")
+class TestImports:
+    """Test that all SASA functions can be imported."""
+
+    def test_imports(self):
+        """Test that all functions are importable."""
+        assert callable(calculate_sasa)
+        assert callable(calculate_residue_sasa)
+        assert callable(calculate_total_sasa)
+        assert callable(calculate_sasa_trajectory)
+        assert callable(get_vdw_radius)
+        assert callable(get_radii_array)
 
 
-def test_two_distant_atoms():
-    """Test SASA of two widely separated atoms"""
-    print("\nTest 2: Two Distant Atoms")
-    print("-" * 40)
-    
-    from rust_simulation_tools import calculate_sasa
-    
-    # Two atoms 100 Å apart (no interaction)
-    coords = np.array([
-        [0.0, 0.0, 0.0],
-        [100.0, 0.0, 0.0]
-    ])
-    radii = np.array([1.7, 1.7])
-    residue_indices = np.array([0, 1])
-    
-    result = calculate_sasa(coords, radii, residue_indices)
-    
-    # Each atom should have full SASA
-    single_atom_sasa = 4 * np.pi * (1.7 + 1.4)**2
-    expected = 2 * single_atom_sasa
-    error = abs(result['total'] - expected) / expected * 100
-    
-    print(f"  Expected: {expected:.2f} Ų")
-    print(f"  Calculated: {result['total']:.2f} Ų")
-    print(f"  Error: {error:.2f}%")
-    print(f"  Atom 1 SASA: {result['per_atom'][0]:.2f} Ų")
-    print(f"  Atom 2 SASA: {result['per_atom'][1]:.2f} Ų")
-    
-    assert error < 5.0, f"Error too large: {error:.2f}%"
-    print("  ✓ PASS: Both atoms have full SASA")
+class TestVdwRadii:
+    """Test VDW radius lookup functions."""
+
+    def test_get_vdw_radius_common_elements(self):
+        """Test VDW radius lookup for common elements."""
+        test_cases = [
+            ('C', 1.70),
+            ('N', 1.55),
+            ('O', 1.52),
+            ('H', 1.20),
+            ('S', 1.80),
+            ('P', 1.80),
+        ]
+        for element, expected in test_cases:
+            radius = get_vdw_radius(element)
+            assert radius == expected, f"{element} radius {radius} != expected {expected}"
+
+    def test_get_vdw_radius_case_insensitive(self):
+        """Test that element lookup is case insensitive."""
+        assert get_vdw_radius('c') == get_vdw_radius('C')
+        assert get_vdw_radius('n') == get_vdw_radius('N')
+        assert get_vdw_radius('o') == get_vdw_radius('O')
+
+    def test_get_radii_array(self):
+        """Test batch radius lookup with get_radii_array."""
+        elements = ['C', 'N', 'O', 'H', 'S']
+        radii = get_radii_array(elements)
+
+        assert len(radii) == len(elements)
+        assert radii[0] == 1.70  # C
+        assert radii[1] == 1.55  # N
+        assert radii[2] == 1.52  # O
+        assert radii[3] == 1.20  # H
+        assert radii[4] == 1.80  # S
+
+    def test_get_radii_array_mixed_case(self):
+        """Test that get_radii_array handles mixed case."""
+        elements = ['C', 'c', 'N', 'n']
+        radii = get_radii_array(elements)
+
+        assert radii[0] == radii[1]  # C == c
+        assert radii[2] == radii[3]  # N == n
 
 
-def test_two_close_atoms():
-    """Test SASA of two atoms close enough to occlude each other"""
-    print("\nTest 3: Two Close Atoms (Occlusion)")
-    print("-" * 40)
-    
-    from rust_simulation_tools import calculate_sasa
-    
-    # Two atoms 3 Å apart (partial occlusion)
-    coords = np.array([
-        [0.0, 0.0, 0.0],
-        [3.0, 0.0, 0.0]
-    ])
-    radii = np.array([1.7, 1.7])
-    residue_indices = np.array([0, 1])
-    
-    result = calculate_sasa(coords, radii, residue_indices)
-    
-    single_atom_sasa = 4 * np.pi * (1.7 + 1.4)**2
-    max_total = 2 * single_atom_sasa
-    
-    print(f"  Maximum possible: {max_total:.2f} Ų")
-    print(f"  Calculated: {result['total']:.2f} Ų")
-    print(f"  Reduction: {(1 - result['total']/max_total)*100:.1f}%")
-    print(f"  Atom 1 SASA: {result['per_atom'][0]:.2f} Ų")
-    print(f"  Atom 2 SASA: {result['per_atom'][1]:.2f} Ų")
-    
-    # Should have reduced SASA due to occlusion
-    assert result['total'] < max_total * 0.95, "No occlusion detected"
-    print("  ✓ PASS: Occlusion detected")
+class TestSingleAtomSasa:
+    """Test SASA calculations for isolated atoms."""
+
+    def test_single_atom_sasa(self):
+        """Test SASA of a single isolated atom matches analytical result."""
+        coords = np.array([[0.0, 0.0, 0.0]])
+        radii = np.array([get_vdw_radius('C')])  # 1.7 Angstrom
+        residue_indices = np.array([0])
+
+        result = calculate_sasa(coords, radii, residue_indices)
+
+        # Analytical: 4*pi*(vdw_radius + probe_radius)^2 = 4*pi*(1.7 + 1.4)^2 ≈ 120.76 A^2
+        expected = 4 * np.pi * (1.7 + 1.4)**2
+        error = abs(result['total'] - expected) / expected * 100
+
+        assert error < 5.0, f"Error {error:.2f}% exceeds 5% threshold"
+
+    def test_two_distant_atoms(self):
+        """Test SASA of two atoms far apart (no interaction)."""
+        coords = np.array([
+            [0.0, 0.0, 0.0],
+            [100.0, 0.0, 0.0]
+        ])
+        radii = np.array([1.7, 1.7])
+        residue_indices = np.array([0, 1])
+
+        result = calculate_sasa(coords, radii, residue_indices)
+
+        # Each atom should have full SASA
+        single_atom_sasa = 4 * np.pi * (1.7 + 1.4)**2
+        expected = 2 * single_atom_sasa
+        error = abs(result['total'] - expected) / expected * 100
+
+        assert error < 5.0, f"Error {error:.2f}% exceeds 5% threshold"
 
 
-def test_buried_atom():
-    """Test SASA of a buried atom surrounded by others"""
-    print("\nTest 4: Buried Atom")
-    print("-" * 40)
-    
-    from rust_simulation_tools import calculate_sasa
-    
-    # Central atom surrounded by 6 neighbors
-    coords = np.array([
-        [0.0, 0.0, 0.0],    # Central atom
-        [3.5, 0.0, 0.0],
-        [-3.5, 0.0, 0.0],
-        [0.0, 3.5, 0.0],
-        [0.0, -3.5, 0.0],
-        [0.0, 0.0, 3.5],
-        [0.0, 0.0, -3.5],
-    ])
-    radii = np.full(7, 1.7)
-    residue_indices = np.arange(7)
-    
-    result = calculate_sasa(coords, radii, residue_indices)
-    
-    central_sasa = result['per_atom'][0]
-    peripheral_mean = result['per_atom'][1:].mean()
-    
-    print(f"  Central atom SASA: {central_sasa:.2f} Ų")
-    print(f"  Peripheral mean SASA: {peripheral_mean:.2f} Ų")
-    print(f"  Burial ratio: {central_sasa/peripheral_mean:.2f}")
-    
-    assert central_sasa < peripheral_mean, "Central atom should be more buried"
-    print("  ✓ PASS: Central atom is more buried")
+class TestSasaOcclusion:
+    """Test SASA calculations with atomic occlusion."""
+
+    def test_two_close_atoms_have_reduced_sasa(self):
+        """Test that two close atoms have less SASA than two distant atoms."""
+        coords = np.array([
+            [0.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0]  # Close enough for partial occlusion
+        ])
+        radii = np.array([1.7, 1.7])
+        residue_indices = np.array([0, 1])
+
+        result = calculate_sasa(coords, radii, residue_indices)
+
+        single_atom_sasa = 4 * np.pi * (1.7 + 1.4)**2
+        max_total = 2 * single_atom_sasa
+
+        assert result['total'] < max_total * 0.95, \
+            f"No occlusion detected: {result['total']:.2f} >= {max_total * 0.95:.2f}"
+
+    def test_buried_atom_has_less_sasa(self):
+        """Test that a central atom surrounded by neighbors is more buried."""
+        # Central atom surrounded by 6 neighbors
+        coords = np.array([
+            [0.0, 0.0, 0.0],    # Central atom
+            [3.5, 0.0, 0.0],
+            [-3.5, 0.0, 0.0],
+            [0.0, 3.5, 0.0],
+            [0.0, -3.5, 0.0],
+            [0.0, 0.0, 3.5],
+            [0.0, 0.0, -3.5],
+        ])
+        radii = np.full(7, 1.7)
+        residue_indices = np.arange(7)
+
+        result = calculate_sasa(coords, radii, residue_indices)
+
+        central_sasa = result['per_atom'][0]
+        peripheral_mean = result['per_atom'][1:].mean()
+
+        assert central_sasa < peripheral_mean, \
+            f"Central atom SASA {central_sasa:.2f} should be < peripheral mean {peripheral_mean:.2f}"
 
 
-def test_vdw_radii():
-    """Test VDW radius lookup"""
-    print("\nTest 5: VDW Radii Lookup")
-    print("-" * 40)
-    
-    from rust_simulation_tools import get_vdw_radius
-    
-    test_cases = [
-        ('C', 1.70),
-        ('N', 1.55),
-        ('O', 1.52),
-        ('H', 1.20),
-        ('S', 1.80),
-        ('P', 1.80),
-    ]
-    
-    for element, expected in test_cases:
-        radius = get_vdw_radius(element)
-        status = "✓" if radius == expected else "✗"
-        print(f"  {status} {element}: {radius:.2f} Å (expected {expected:.2f})")
-        assert radius == expected, f"{element} radius mismatch: {radius} != {expected}"
-    
-    # Test case insensitivity
-    assert get_vdw_radius('c') == get_vdw_radius('C'), "Case sensitivity issue"
-    print("  ✓ Case insensitive")
-    print("  ✓ PASS: All radii correct")
+class TestPerResidueSasa:
+    """Test per-residue SASA aggregation."""
+
+    def test_per_residue_equals_sum_of_atoms(self):
+        """Test that per-residue SASA equals sum of per-atom SASA."""
+        coords = np.array([
+            [0.0, 0.0, 0.0],
+            [2.5, 0.0, 0.0],
+            [100.0, 0.0, 0.0],
+        ])
+        radii = np.array([1.7, 1.5, 1.7])
+        residue_indices = np.array([0, 0, 1])  # First two in res 0, third in res 1
+
+        result = calculate_sasa(coords, radii, residue_indices)
+
+        res0_sasa = result['per_residue'][0]
+        res1_sasa = result['per_residue'][1]
+        atom0_sasa = result['per_atom'][0]
+        atom1_sasa = result['per_atom'][1]
+        atom2_sasa = result['per_atom'][2]
+
+        assert abs(res0_sasa - (atom0_sasa + atom1_sasa)) < 0.01, \
+            f"Residue 0: {res0_sasa} != {atom0_sasa} + {atom1_sasa}"
+        assert abs(res1_sasa - atom2_sasa) < 0.01, \
+            f"Residue 1: {res1_sasa} != {atom2_sasa}"
 
 
-def test_per_residue():
-    """Test per-residue SASA aggregation"""
-    print("\nTest 6: Per-Residue Aggregation")
-    print("-" * 40)
-    
-    from rust_simulation_tools import calculate_sasa
-    
-    # 3 atoms: 2 in residue 0, 1 in residue 1
-    coords = np.array([
-        [0.0, 0.0, 0.0],
-        [2.5, 0.0, 0.0],
-        [100.0, 0.0, 0.0],
-    ])
-    radii = np.array([1.7, 1.5, 1.7])
-    residue_indices = np.array([0, 0, 1])
-    
-    result = calculate_sasa(coords, radii, residue_indices)
-    
-    res0_sasa = result['per_residue'][0]
-    res1_sasa = result['per_residue'][1]
-    atom0_sasa = result['per_atom'][0]
-    atom1_sasa = result['per_atom'][1]
-    atom2_sasa = result['per_atom'][2]
-    
-    print(f"  Residue 0 SASA: {res0_sasa:.2f} Ų")
-    print(f"    Atom 0: {atom0_sasa:.2f} Ų")
-    print(f"    Atom 1: {atom1_sasa:.2f} Ų")
-    print(f"    Sum: {atom0_sasa + atom1_sasa:.2f} Ų")
-    print(f"  Residue 1 SASA: {res1_sasa:.2f} Ų")
-    print(f"    Atom 2: {atom2_sasa:.2f} Ų")
-    
-    # Check that per-residue is sum of per-atom
-    assert abs(res0_sasa - (atom0_sasa + atom1_sasa)) < 0.01, "Residue 0 aggregation mismatch"
-    assert abs(res1_sasa - atom2_sasa) < 0.01, "Residue 1 aggregation mismatch"
-    print("  ✓ PASS: Per-residue equals sum of per-atom")
+class TestSasaFunctions:
+    """Test different SASA calculation functions give consistent results."""
+
+    def test_functions_consistency(self):
+        """Test that calculate_sasa, calculate_residue_sasa, and calculate_total_sasa are consistent."""
+        coords = np.array([
+            [0.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+        ])
+        radii = np.array([1.7, 1.7])
+        residue_indices = np.array([0, 1])
+
+        full_result = calculate_sasa(coords, radii, residue_indices)
+        residue_result = calculate_residue_sasa(coords, radii, residue_indices)
+        total_result = calculate_total_sasa(coords, radii)
+
+        assert abs(full_result['total'] - total_result) < 0.01, \
+            f"Total mismatch: {full_result['total']} != {total_result}"
+        assert abs(full_result['per_residue'][0] - residue_result[0]) < 0.01, \
+            f"Residue 0 mismatch"
+        assert abs(full_result['per_residue'][1] - residue_result[1]) < 0.01, \
+            f"Residue 1 mismatch"
 
 
-def test_fast_functions():
-    """Test fast calculation variants"""
-    print("\nTest 7: Fast Calculation Functions")
-    print("-" * 40)
-    
-    from rust_simulation_tools import (
-        calculate_sasa,
-        calculate_residue_sasa,
-        calculate_total_sasa,
-    )
-    
-    coords = np.array([
-        [0.0, 0.0, 0.0],
-        [5.0, 0.0, 0.0],
-    ])
-    radii = np.array([1.7, 1.7])
-    residue_indices = np.array([0, 1])
-    
-    # Full calculation
-    full_result = calculate_sasa(coords, radii, residue_indices)
-    
-    # Fast residue-only
-    residue_result = calculate_residue_sasa(coords, radii, residue_indices)
-    
-    # Fast total-only
-    total_result = calculate_total_sasa(coords, radii)
-    
-    print(f"  Full result total: {full_result['total']:.2f} Ų")
-    print(f"  Total-only result: {total_result:.2f} Ų")
-    print(f"  Difference: {abs(full_result['total'] - total_result):.4f} Ų")
-    
-    # Check consistency
-    assert abs(full_result['total'] - total_result) < 0.01, "Total mismatch"
-    assert abs(full_result['per_residue'][0] - residue_result[0]) < 0.01, "Residue 0 mismatch"
-    assert abs(full_result['per_residue'][1] - residue_result[1]) < 0.01, "Residue 1 mismatch"
-    print("  ✓ PASS: All functions give consistent results")
+class TestProbeRadius:
+    """Test different probe radii."""
+
+    def test_sasa_increases_with_probe_radius(self):
+        """Test that SASA increases with larger probe radius."""
+        coords = np.array([[0.0, 0.0, 0.0]])
+        radii = np.array([1.5])
+
+        probe_radii = [0.0, 1.0, 1.4, 2.0]
+        results = []
+
+        for probe_r in probe_radii:
+            sasa = calculate_total_sasa(coords, radii, probe_radius=probe_r)
+            results.append(sasa)
+
+        for i in range(len(results) - 1):
+            assert results[i] < results[i+1], \
+                f"SASA should increase with probe radius: {results[i]} >= {results[i+1]}"
 
 
-def test_probe_radius():
-    """Test different probe radii"""
-    print("\nTest 8: Different Probe Radii")
-    print("-" * 40)
-    
-    from rust_simulation_tools import calculate_total_sasa
-    
-    coords = np.array([[0.0, 0.0, 0.0]])
-    radii = np.array([1.5])
-    
-    probe_radii = [0.0, 1.0, 1.4, 2.0]
-    results = []
-    
-    for probe_r in probe_radii:
-        sasa = calculate_total_sasa(coords, radii, probe_radius=probe_r)
-        results.append(sasa)
-        expected = 4 * np.pi * (1.5 + probe_r)**2
-        print(f"  Probe {probe_r:.1f} Å: {sasa:.2f} Ų (expected {expected:.2f})")
-    
-    # SASA should increase with probe radius
-    for i in range(len(results) - 1):
-        assert results[i] < results[i+1], f"SASA didn't increase: {results[i]} >= {results[i+1]}"
-    print("  ✓ PASS: SASA increases with probe radius")
+class TestSpherePoints:
+    """Test different sphere point densities."""
+
+    def test_sphere_point_convergence(self):
+        """Test that results converge with more sphere points."""
+        coords = np.array([[0.0, 0.0, 0.0]])
+        radii = np.array([1.5])
+
+        point_counts = [92, 162, 242, 480, 960]
+        results = []
+
+        for n_points in point_counts:
+            sasa = calculate_total_sasa(coords, radii, n_sphere_points=n_points)
+            results.append(sasa)
+
+        # Results should converge - standard deviation should be small
+        std = np.std(results)
+        assert std < 2.0, f"Poor convergence with std = {std:.2f}"
 
 
-def test_sphere_points():
-    """Test different sphere point densities"""
-    print("\nTest 9: Sphere Point Densities")
-    print("-" * 40)
-    
-    import time
-    from rust_simulation_tools import calculate_total_sasa
-    
-    coords = np.array([[0.0, 0.0, 0.0]])
-    radii = np.array([1.5])
-    
-    point_counts = [92, 162, 242, 480, 960]
-    
-    print("  Points | SASA (Ų) | Time (ms)")
-    print("  " + "-" * 36)
-    
-    results = []
-    for n_points in point_counts:
-        start = time.time()
-        sasa = calculate_total_sasa(coords, radii, n_sphere_points=n_points)
-        elapsed = (time.time() - start) * 1000
-        results.append(sasa)
-        print(f"  {n_points:5d}  | {sasa:8.2f}  | {elapsed:6.2f}")
-    
-    # Results should converge (std should be small)
-    std = np.std(results)
-    assert std < 2.0, f"Poor convergence: std = {std:.2f}"
-    print(f"  ✓ PASS: Results converge (std = {std:.2f})")
+class TestTrajectory:
+    """Test trajectory-based SASA calculations."""
+
+    def test_calculate_sasa_trajectory(self):
+        """Test SASA calculation over multiple frames."""
+        n_frames = 3
+        n_atoms = 5
+
+        # Create random coordinates for each frame
+        np.random.seed(42)
+        coords = np.random.randn(n_frames, n_atoms, 3) * 5.0
+        radii = np.full(n_atoms, 1.7)
+        residue_indices = np.arange(n_atoms)
+
+        result = calculate_sasa_trajectory(coords, radii, residue_indices)
+
+        # Result should be a dict with 'per_atom', 'per_residue', 'total'
+        assert isinstance(result, dict), "Result should be a dictionary"
+        assert 'per_atom' in result, "Result should contain 'per_atom'"
+        assert 'per_residue' in result, "Result should contain 'per_residue'"
+        assert 'total' in result, "Result should contain 'total'"
+
+        # per_atom is returned as a flat array (n_frames * n_atoms,)
+        # that can be reshaped to (n_frames, n_atoms)
+        per_atom = result['per_atom']
+        assert per_atom.shape == (n_frames * n_atoms,), \
+            f"Expected per_atom shape ({n_frames * n_atoms},), got {per_atom.shape}"
+
+        # Verify it can be reshaped to (n_frames, n_atoms)
+        per_atom_reshaped = per_atom.reshape(n_frames, n_atoms)
+        assert per_atom_reshaped.shape == (n_frames, n_atoms)
+
+        # total should have shape (n_frames,)
+        total = result['total']
+        assert total.shape == (n_frames,), \
+            f"Expected total shape ({n_frames},), got {total.shape}"
+
+        # per_residue should be a list of n_frames dicts
+        per_residue = result['per_residue']
+        assert isinstance(per_residue, list), "per_residue should be a list"
+        assert len(per_residue) == n_frames, \
+            f"Expected {n_frames} per_residue entries, got {len(per_residue)}"
+
+        # All values should be non-negative
+        assert np.all(per_atom >= 0), "SASA values should be non-negative"
+        assert np.all(total >= 0), "Total SASA values should be non-negative"
+
+    def test_trajectory_matches_frame_by_frame(self):
+        """Test that trajectory SASA matches frame-by-frame calculation."""
+        n_frames = 3
+        n_atoms = 4
+
+        np.random.seed(123)
+        coords = np.random.randn(n_frames, n_atoms, 3) * 5.0
+        radii = np.full(n_atoms, 1.6)
+        residue_indices = np.arange(n_atoms)
+
+        # Calculate using trajectory function
+        traj_result = calculate_sasa_trajectory(coords, radii, residue_indices)
+
+        # Reshape per_atom to (n_frames, n_atoms)
+        traj_per_atom = traj_result['per_atom'].reshape(n_frames, n_atoms)
+
+        # Calculate frame by frame
+        for frame_idx in range(n_frames):
+            frame_coords = coords[frame_idx]
+            single_result = calculate_sasa(frame_coords, radii, residue_indices)
+
+            # Per-atom SASA should match
+            np.testing.assert_allclose(
+                traj_per_atom[frame_idx],
+                single_result['per_atom'],
+                rtol=1e-5,
+                err_msg=f"Frame {frame_idx} per-atom SASA mismatch"
+            )
+
+            # Total SASA should match
+            np.testing.assert_allclose(
+                traj_result['total'][frame_idx],
+                single_result['total'],
+                rtol=1e-5,
+                err_msg=f"Frame {frame_idx} total SASA mismatch"
+            )
 
 
-def test_performance():
-    """Test performance on larger system"""
-    print("\nTest 10: Performance Benchmark")
-    print("-" * 40)
-    
-    import time
-    from rust_simulation_tools import calculate_sasa
-    
-    sizes = [100, 500, 1000]
-    
-    print("  Atoms | Time (ms) | SASA (Ų)")
-    print("  " + "-" * 36)
-    
-    for n_atoms in sizes:
-        # Generate random system
+class TestPerformance:
+    """Test performance on larger systems."""
+
+    @pytest.mark.parametrize("n_atoms", [100, 500])
+    def test_performance_scales(self, n_atoms):
+        """Test that SASA calculation handles larger systems."""
+        np.random.seed(42)
         coords = np.random.randn(n_atoms, 3) * 10.0
         radii = np.random.uniform(1.2, 1.9, n_atoms)
         residue_indices = np.arange(n_atoms)
-        
-        start = time.time()
+
         result = calculate_sasa(coords, radii, residue_indices, n_sphere_points=480)
-        elapsed = (time.time() - start) * 1000
-        
-        print(f"  {n_atoms:5d} | {elapsed:9.2f} | {result['total']:8.1f}")
-    
-    print("  ✓ PASS: Performance test complete")
 
-
-def run_all_tests():
-    """Run all tests and report results"""
-    print("=" * 60)
-    print("SASA Implementation Test Suite")
-    print("=" * 60)
-    
-    tests = [
-        ("Import Test", test_imports),
-        ("Single Atom", test_single_atom_sasa),
-        ("Two Distant Atoms", test_two_distant_atoms),
-        ("Two Close Atoms", test_two_close_atoms),
-        ("Buried Atom", test_buried_atom),
-        ("VDW Radii", test_vdw_radii),
-        ("Per-Residue", test_per_residue),
-        ("Fast Functions", test_fast_functions),
-        ("Probe Radius", test_probe_radius),
-        ("Sphere Points", test_sphere_points),
-        ("Performance", test_performance),
-    ]
-    
-    results = []
-    
-    for name, test_func in tests:
-        try:
-            test_func()
-            results.append((name, True))
-        except AssertionError as e:
-            print(f"\n  ✗ FAIL: {e}")
-            results.append((name, False))
-        except Exception as e:
-            print(f"\n  ✗ ERROR: {e}")
-            results.append((name, False))
-    
-    # Summary
-    print("\n" + "=" * 60)
-    print("Test Summary")
-    print("=" * 60)
-    
-    passed = sum(1 for _, result in results if result)
-    total = len(results)
-    
-    for name, result in results:
-        status = "✓ PASS" if result else "✗ FAIL"
-        print(f"  {status}: {name}")
-    
-    print("-" * 60)
-    print(f"  Total: {passed}/{total} tests passed")
-    print("=" * 60)
-    
-    return passed == total
+        assert result['total'] > 0, "Total SASA should be positive"
+        assert len(result['per_atom']) == n_atoms
+        assert len(result['per_residue']) == n_atoms
 
 
 if __name__ == "__main__":
-    success = run_all_tests()
-    sys.exit(0 if success else 1)
+    pytest.main([__file__, "-v", "--tb=short"])

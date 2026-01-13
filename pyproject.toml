@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rust_simulation_tools"
-version = "0.1.11"
+version = "0.2.0"
 description = "Fast algorithms for MD trajectories"
 readme = "README.md"
 authors = [
@@ -47,5 +47,5 @@ exclude_lines = [
 
 [tool.black]
 line-length = 100
-target-version = ['py39', 'py310', 'py311', 'py312', 'py313', 'py314']
+target-version = ['py39', 'py310', 'py311', 'py312', 'py313']
 include = '\.pyi?$'
