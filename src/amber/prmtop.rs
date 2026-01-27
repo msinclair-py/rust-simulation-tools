@@ -552,8 +552,11 @@ impl PyAmberTopology {
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         let atom_indices: Vec<i64> = selection.atom_indices.iter().map(|&x| x as i64).collect();
-        let residue_offsets: Vec<i64> =
-            selection.residue_offsets.iter().map(|&x| x as i64).collect();
+        let residue_offsets: Vec<i64> = selection
+            .residue_offsets
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
 
         Ok((
             PyArray1::from_vec_bound(py, atom_indices),

@@ -110,8 +110,7 @@ impl PyFingerprintSession {
     #[new]
     #[pyo3(signature = (topology_path, dcd_path=None))]
     fn new(topology_path: &str, dcd_path: Option<&str>) -> PyResult<Self> {
-        let topology =
-            parse_prmtop(topology_path).map_err(pyo3::exceptions::PyIOError::new_err)?;
+        let topology = parse_prmtop(topology_path).map_err(pyo3::exceptions::PyIOError::new_err)?;
 
         // Pre-extract force field parameters
         let charges = topology.charges.clone();
@@ -180,13 +179,11 @@ impl PyFingerprintSession {
             FingerprintMode::Binder => self.binder_selection.as_ref(),
         };
 
-        selection
-            .map(|s| s.residue_labels.clone())
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "Selection not set. Call set_target_residues() or set_binder_residues() first.",
-                )
-            })
+        selection.map(|s| s.residue_labels.clone()).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "Selection not set. Call set_target_residues() or set_binder_residues() first.",
+            )
+        })
     }
 
     /// Number of residues being fingerprinted in current mode.
@@ -197,13 +194,11 @@ impl PyFingerprintSession {
             FingerprintMode::Binder => self.binder_selection.as_ref(),
         };
 
-        selection
-            .map(|s| s.residue_labels.len())
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "Selection not set. Call set_target_residues() or set_binder_residues() first.",
-                )
-            })
+        selection.map(|s| s.residue_labels.len()).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "Selection not set. Call set_target_residues() or set_binder_residues() first.",
+            )
+        })
     }
 
     /// Set the target residue selection.
@@ -390,8 +385,12 @@ impl PyFingerprintSession {
             .map(|&idx| self.epsilons[idx])
             .collect();
 
-        let partner_data =
-            PartnerData::from_vecs(partner_positions, partner_charges, partner_sigmas, partner_epsilons);
+        let partner_data = PartnerData::from_vecs(
+            partner_positions,
+            partner_charges,
+            partner_sigmas,
+            partner_epsilons,
+        );
 
         // Build residue data for each primary residue
         let n_residues = primary.residue_labels.len();
