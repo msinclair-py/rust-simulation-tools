@@ -60,6 +60,17 @@ pub struct AmberTopology {
     pub atom_epsilons: Vec<f64>,
 }
 
+/// Atom selection grouped by residue for fingerprint calculations.
+#[derive(Debug, Clone)]
+pub struct AtomSelection {
+    /// Flat list of atom indices (global, 0-based)
+    pub atom_indices: Vec<usize>,
+    /// Start offset per residue in atom_indices
+    pub residue_offsets: Vec<usize>,
+    /// Residue names/labels
+    pub residue_labels: Vec<String>,
+}
+
 impl AmberTopology {
     /// Get the residue index for each atom.
     pub fn atom_residue_indices(&self) -> Vec<usize> {
@@ -97,6 +108,93 @@ impl AmberTopology {
         offsets.push(indices.len() as i64);
 
         (indices, offsets)
+    }
+
+    /// Build an atom selection for a specific set of residues.
+    ///
+    /// # Arguments
+    /// * `residue_indices` - 0-based residue indices to include in the selection
+    ///
+    /// # Returns
+    /// * `Ok(AtomSelection)` - Selection with atom indices grouped by residue
+    /// * `Err(String)` - If any residue index is out of range
+    pub fn build_selection(&self, residue_indices: &[usize]) -> Result<AtomSelection, String> {
+        // Validate indices
+        for &res_idx in residue_indices {
+            if res_idx >= self.n_residues {
+                return Err(format!(
+                    "Residue index {} out of range (0-{})",
+                    res_idx,
+                    self.n_residues - 1
+                ));
+            }
+        }
+
+        let mut atom_indices = Vec::new();
+        let mut residue_offsets = Vec::with_capacity(residue_indices.len() + 1);
+        let mut residue_labels = Vec::with_capacity(residue_indices.len());
+
+        for &res_idx in residue_indices {
+            residue_offsets.push(atom_indices.len());
+
+            let start = self.residue_pointers[res_idx];
+            let end = if res_idx + 1 < self.n_residues {
+                self.residue_pointers[res_idx + 1]
+            } else {
+                self.n_atoms
+            };
+
+            for atom_idx in start..end {
+                atom_indices.push(atom_idx);
+            }
+
+            residue_labels.push(self.residue_labels[res_idx].clone());
+        }
+        residue_offsets.push(atom_indices.len());
+
+        Ok(AtomSelection {
+            atom_indices,
+            residue_offsets,
+            residue_labels,
+        })
+    }
+
+    /// Get all atom indices for a set of residues (flat list, no grouping).
+    ///
+    /// # Arguments
+    /// * `residue_indices` - 0-based residue indices
+    ///
+    /// # Returns
+    /// * `Ok(Vec<usize>)` - Flat list of atom indices
+    /// * `Err(String)` - If any residue index is out of range
+    pub fn get_atom_indices_for_residues(
+        &self,
+        residue_indices: &[usize],
+    ) -> Result<Vec<usize>, String> {
+        let mut atom_indices = Vec::new();
+
+        for &res_idx in residue_indices {
+            if res_idx >= self.n_residues {
+                return Err(format!(
+                    "Residue index {} out of range (0-{})",
+                    res_idx,
+                    self.n_residues - 1
+                ));
+            }
+
+            let start = self.residue_pointers[res_idx];
+            let end = if res_idx + 1 < self.n_residues {
+                self.residue_pointers[res_idx + 1]
+            } else {
+                self.n_atoms
+            };
+
+            for atom_idx in start..end {
+                atom_indices.push(atom_idx);
+            }
+        }
+
+        Ok(atom_indices)
     }
 }
 
@@ -423,6 +521,70 @@ impl PyAmberTopology {
             .map(|&x| x as i64)
             .collect();
         PyArray1::from_vec_bound(py, ptrs)
+    }
+
+    /// Build an atom selection for a specific set of residues.
+    ///
+    /// Parameters
+    /// ----------
+    /// residue_indices : list or array of int
+    ///     0-based residue indices to include in the selection.
+    ///
+    /// Returns
+    /// -------
+    /// tuple
+    ///     (atom_indices, residue_offsets, residue_labels) where:
+    ///     - atom_indices: flat array of atom indices
+    ///     - residue_offsets: start offset for each residue (length n_residues + 1)
+    ///     - residue_labels: list of residue names
+    fn build_selection<'py>(
+        &self,
+        py: Python<'py>,
+        residue_indices: Vec<usize>,
+    ) -> PyResult<(
+        Bound<'py, PyArray1<i64>>,
+        Bound<'py, PyArray1<i64>>,
+        Vec<String>,
+    )> {
+        let selection = self
+            .inner
+            .build_selection(&residue_indices)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        let atom_indices: Vec<i64> = selection.atom_indices.iter().map(|&x| x as i64).collect();
+        let residue_offsets: Vec<i64> =
+            selection.residue_offsets.iter().map(|&x| x as i64).collect();
+
+        Ok((
+            PyArray1::from_vec_bound(py, atom_indices),
+            PyArray1::from_vec_bound(py, residue_offsets),
+            selection.residue_labels,
+        ))
+    }
+
+    /// Get all atom indices for a set of residues (flat list).
+    ///
+    /// Parameters
+    /// ----------
+    /// residue_indices : list or array of int
+    ///     0-based residue indices.
+    ///
+    /// Returns
+    /// -------
+    /// ndarray of int64
+    ///     Flat array of atom indices for all specified residues.
+    fn get_atom_indices<'py>(
+        &self,
+        py: Python<'py>,
+        residue_indices: Vec<usize>,
+    ) -> PyResult<Bound<'py, PyArray1<i64>>> {
+        let indices = self
+            .inner
+            .get_atom_indices_for_residues(&residue_indices)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        let indices_i64: Vec<i64> = indices.iter().map(|&x| x as i64).collect();
+        Ok(PyArray1::from_vec_bound(py, indices_i64))
     }
 }
 

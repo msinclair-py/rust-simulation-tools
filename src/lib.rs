@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 mod amber;
 mod fingerprint;
+mod fingerprint_session;
 mod kabsch;
 mod sasa;
 mod trajectory;
@@ -38,5 +39,8 @@ fn rust_simulation_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Trajectory readers
     m.add_class::<trajectory::dcd::PyDcdReader>()?;
     m.add_function(wrap_pyfunction!(trajectory::dcd::read_dcd_header_py, m)?)?;
+    // Fingerprint session (high-level API)
+    m.add_class::<fingerprint_session::PyFingerprintSession>()?;
+    m.add_class::<fingerprint_session::PyFingerprintMode>()?;
     Ok(())
 }

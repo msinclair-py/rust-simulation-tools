@@ -125,8 +125,10 @@ impl CellList {
 // Pre-extracted Data Structures
 // ============================================================================
 
-/// Pre-extracted binder data with cell list for efficient lookup.
-struct BinderData {
+/// Pre-extracted partner data with cell list for efficient lookup.
+/// "Partner" refers to the selection we're computing interactions against
+/// (build cell list from these atoms).
+pub struct PartnerData {
     positions: Vec<[f64; 3]>,
     charges: Vec<f64>,
     sigmas: Vec<f64>,
@@ -134,15 +136,16 @@ struct BinderData {
     cell_list: CellList,
 }
 
-impl BinderData {
-    fn new(
+impl PartnerData {
+    /// Create partner data from global arrays and atom indices.
+    pub fn new(
         all_positions: ArrayView2<f64>,
         all_charges: ArrayView1<f64>,
         all_sigmas: ArrayView1<f64>,
         all_epsilons: ArrayView1<f64>,
-        binder_indices: ArrayView1<i64>,
+        partner_indices: ArrayView1<i64>,
     ) -> Self {
-        let positions: Vec<[f64; 3]> = binder_indices
+        let positions: Vec<[f64; 3]> = partner_indices
             .iter()
             .map(|&idx| {
                 let i = idx as usize;
@@ -154,17 +157,17 @@ impl BinderData {
             })
             .collect();
 
-        let charges: Vec<f64> = binder_indices
+        let charges: Vec<f64> = partner_indices
             .iter()
             .map(|&idx| all_charges[idx as usize])
             .collect();
 
-        let sigmas: Vec<f64> = binder_indices
+        let sigmas: Vec<f64> = partner_indices
             .iter()
             .map(|&idx| all_sigmas[idx as usize])
             .collect();
 
-        let epsilons: Vec<f64> = binder_indices
+        let epsilons: Vec<f64> = partner_indices
             .iter()
             .map(|&idx| all_epsilons[idx as usize])
             .collect();
@@ -179,11 +182,28 @@ impl BinderData {
             cell_list,
         }
     }
+
+    /// Create partner data from pre-extracted vectors (for FingerprintSession).
+    pub fn from_vecs(
+        positions: Vec<[f64; 3]>,
+        charges: Vec<f64>,
+        sigmas: Vec<f64>,
+        epsilons: Vec<f64>,
+    ) -> Self {
+        let cell_list = CellList::new(&positions);
+        Self {
+            positions,
+            charges,
+            sigmas,
+            epsilons,
+            cell_list,
+        }
+    }
 }
 
 /// Pre-extracted residue data for efficient parallel processing.
 /// Extracting once before parallelization avoids repeated work in each thread.
-struct ResidueData {
+pub struct ResidueData {
     positions: Vec<[f64; 3]>,
     charges: Vec<f64>,
     sigmas: Vec<f64>,
@@ -191,7 +211,8 @@ struct ResidueData {
 }
 
 impl ResidueData {
-    fn new(
+    /// Create residue data from global arrays using resmap indices.
+    pub fn new(
         positions: ArrayView2<f64>,
         charges: ArrayView1<f64>,
         sigmas: ArrayView1<f64>,
@@ -225,6 +246,35 @@ impl ResidueData {
             epsilons: res_epsilons,
         }
     }
+
+    /// Create residue data from pre-extracted vectors (for FingerprintSession).
+    /// atom_indices are global atom indices within the positions array.
+    pub fn from_global_indices(
+        positions: &[[f64; 3]],
+        charges: &[f64],
+        sigmas: &[f64],
+        epsilons: &[f64],
+        atom_indices: &[usize],
+    ) -> Self {
+        let mut res_positions = Vec::with_capacity(atom_indices.len());
+        let mut res_charges = Vec::with_capacity(atom_indices.len());
+        let mut res_sigmas = Vec::with_capacity(atom_indices.len());
+        let mut res_epsilons = Vec::with_capacity(atom_indices.len());
+
+        for &idx in atom_indices {
+            res_positions.push(positions[idx]);
+            res_charges.push(charges[idx]);
+            res_sigmas.push(sigmas[idx]);
+            res_epsilons.push(epsilons[idx]);
+        }
+
+        Self {
+            positions: res_positions,
+            charges: res_charges,
+            sigmas: res_sigmas,
+            epsilons: res_epsilons,
+        }
+    }
 }
 
 // ============================================================================
@@ -235,7 +285,7 @@ impl ResidueData {
 #[inline]
 fn compute_residue_energy(
     residue: &ResidueData,
-    binder: &BinderData,
+    partner: &PartnerData,
     k_rf: f64,
     c_rf: f64,
     prefactor: f64,
@@ -253,13 +303,13 @@ fn compute_residue_energy(
             let sig_i = residue.sigmas[i];
             let eps_i = residue.epsilons[i];
 
-            // Get only binder atoms in neighboring cells
-            binder
+            // Get only partner atoms in neighboring cells
+            partner
                 .cell_list
                 .get_neighbors_into(pos_i, &mut neighbor_buffer);
 
             for &j in neighbor_buffer.iter() {
-                let pos_j = &binder.positions[j];
+                let pos_j = &partner.positions[j];
                 let dist_sq = distance_squared(pos_i, pos_j);
 
                 if dist_sq < 1e-20 {
@@ -268,8 +318,8 @@ fn compute_residue_energy(
 
                 // Lennard-Jones (cutoff 1.2 nm)
                 if dist_sq <= LJ_CUTOFF_SQ {
-                    let sig_j = binder.sigmas[j];
-                    let eps_j = binder.epsilons[j];
+                    let sig_j = partner.sigmas[j];
+                    let eps_j = partner.epsilons[j];
 
                     let sigma_ij = 0.5 * (sig_i + sig_j);
                     let epsilon_ij = (eps_i * eps_j).sqrt();
@@ -284,7 +334,7 @@ fn compute_residue_energy(
 
                 // Electrostatic (cutoff 1.0 nm)
                 if dist_sq <= ES_CUTOFF_SQ {
-                    let qj = binder.charges[j];
+                    let qj = partner.charges[j];
                     let distance = dist_sq.sqrt();
                     let r = distance * 1e-9; // nm to m
 
@@ -297,37 +347,52 @@ fn compute_residue_energy(
     (lj_energy, es_energy)
 }
 
-/// Core fingerprint computation (internal).
-fn compute_fingerprints_internal(
+/// Generic fingerprint computation - can fingerprint either selection.
+///
+/// This is the core computation function that computes per-residue interaction
+/// energies between a "primary" selection (what we're fingerprinting) and a
+/// "partner" selection (what we're interacting with).
+///
+/// # Arguments
+/// * `positions` - All atom coordinates (n_atoms, 3) in nm
+/// * `charges` - All atom partial charges in elementary charge units
+/// * `sigmas` - All atom LJ sigma parameters in nm
+/// * `epsilons` - All atom LJ epsilon parameters in kJ/mol
+/// * `primary_resmap_indices` - Atom indices for each primary residue (flattened)
+/// * `primary_resmap_offsets` - Start offset for each primary residue (length n_residues + 1)
+/// * `partner_indices` - Atom indices for the partner selection
+///
+/// # Returns
+/// (lj_fingerprint, es_fingerprint) - Per-residue LJ and ES energies in kJ/mol
+pub fn compute_fingerprints_generic(
     positions: ArrayView2<f64>,
     charges: ArrayView1<f64>,
     sigmas: ArrayView1<f64>,
     epsilons: ArrayView1<f64>,
-    resmap_indices: ArrayView1<i64>,
-    resmap_offsets: ArrayView1<i64>,
-    binder_indices: ArrayView1<i64>,
+    primary_resmap_indices: ArrayView1<i64>,
+    primary_resmap_offsets: ArrayView1<i64>,
+    partner_indices: ArrayView1<i64>,
 ) -> (Array1<f64>, Array1<f64>) {
-    let n_residues = resmap_offsets.len() - 1;
+    let n_residues = primary_resmap_offsets.len() - 1;
 
     // Get cached reaction field parameters
     let (k_rf, c_rf, prefactor) =
         RF_PARAMS.with(|params| (params.k_rf, params.c_rf, params.prefactor));
 
-    // Build binder data with cell list (done once)
-    let binder = BinderData::new(positions, charges, sigmas, epsilons, binder_indices);
+    // Build partner data with cell list (done once)
+    let partner = PartnerData::new(positions, charges, sigmas, epsilons, partner_indices);
 
     // Pre-extract all residue data before parallel processing
-    // This avoids repeated extraction work in each parallel task
     let residue_data: Vec<ResidueData> = (0..n_residues)
         .map(|res_idx| {
-            let start = resmap_offsets[res_idx] as usize;
-            let end = resmap_offsets[res_idx + 1] as usize;
+            let start = primary_resmap_offsets[res_idx] as usize;
+            let end = primary_resmap_offsets[res_idx + 1] as usize;
             ResidueData::new(
                 positions,
                 charges,
                 sigmas,
                 epsilons,
-                resmap_indices,
+                primary_resmap_indices,
                 start,
                 end,
             )
@@ -337,7 +402,7 @@ fn compute_fingerprints_internal(
     // Parallel computation over residues using pre-extracted data
     let results: Vec<(f64, f64)> = residue_data
         .par_iter()
-        .map(|residue| compute_residue_energy(residue, &binder, k_rf, c_rf, prefactor))
+        .map(|residue| compute_residue_energy(residue, &partner, k_rf, c_rf, prefactor))
         .collect();
 
     let mut lj_fingerprint = Array1::<f64>::zeros(n_residues);
@@ -349,6 +414,59 @@ fn compute_fingerprints_internal(
     }
 
     (lj_fingerprint, es_fingerprint)
+}
+
+/// Compute fingerprints from pre-extracted residue and partner data.
+///
+/// This variant is used by FingerprintSession for efficient frame-by-frame
+/// computation where we don't need to re-extract FF parameters each frame.
+pub fn compute_fingerprints_from_residues(
+    residue_data: &[ResidueData],
+    partner: &PartnerData,
+) -> (Array1<f64>, Array1<f64>) {
+    let n_residues = residue_data.len();
+
+    // Get cached reaction field parameters
+    let (k_rf, c_rf, prefactor) =
+        RF_PARAMS.with(|params| (params.k_rf, params.c_rf, params.prefactor));
+
+    // Parallel computation over residues
+    let results: Vec<(f64, f64)> = residue_data
+        .par_iter()
+        .map(|residue| compute_residue_energy(residue, partner, k_rf, c_rf, prefactor))
+        .collect();
+
+    let mut lj_fingerprint = Array1::<f64>::zeros(n_residues);
+    let mut es_fingerprint = Array1::<f64>::zeros(n_residues);
+
+    for (i, (lj, es)) in results.into_iter().enumerate() {
+        lj_fingerprint[i] = lj;
+        es_fingerprint[i] = es;
+    }
+
+    (lj_fingerprint, es_fingerprint)
+}
+
+/// Core fingerprint computation (internal) - backward compatible wrapper.
+fn compute_fingerprints_internal(
+    positions: ArrayView2<f64>,
+    charges: ArrayView1<f64>,
+    sigmas: ArrayView1<f64>,
+    epsilons: ArrayView1<f64>,
+    resmap_indices: ArrayView1<i64>,
+    resmap_offsets: ArrayView1<i64>,
+    binder_indices: ArrayView1<i64>,
+) -> (Array1<f64>, Array1<f64>) {
+    // Delegate to the generic function with target as primary, binder as partner
+    compute_fingerprints_generic(
+        positions,
+        charges,
+        sigmas,
+        epsilons,
+        resmap_indices,
+        resmap_offsets,
+        binder_indices,
+    )
 }
 
 // ============================================================================
