@@ -13,7 +13,11 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(tokens: Vec<SpannedToken>, input: String) -> Self {
-        Self { tokens, pos: 0, input }
+        Self {
+            tokens,
+            pos: 0,
+            input,
+        }
     }
 
     pub fn parse(mut self) -> Result<Expr, SelectionError> {
@@ -21,8 +25,11 @@ impl Parser {
         if !self.at_eof() {
             let span = self.current_span();
             return Err(SelectionError::new(format!(
-                "Unexpected token {:?}", self.current().token
-            )).with_span(span.0, span.1).with_input(self.input.clone()));
+                "Unexpected token {:?}",
+                self.current().token
+            ))
+            .with_span(span.0, span.1)
+            .with_input(self.input.clone()));
         }
         Ok(expr)
     }
@@ -51,9 +58,11 @@ impl Parser {
             self.advance();
             Ok(tok)
         } else {
-            Err(SelectionError::new(format!(
-                "Expected {:?}, found {:?}", expected, tok.token
-            )).with_span(tok.span.0, tok.span.1).with_input(self.input.clone()))
+            Err(
+                SelectionError::new(format!("Expected {:?}, found {:?}", expected, tok.token))
+                    .with_span(tok.span.0, tok.span.1)
+                    .with_input(self.input.clone()),
+            )
         }
     }
 
@@ -105,18 +114,42 @@ impl Parser {
                 self.parse_numeric_kw()
             }
             Token::Resid | Token::Index => self.parse_range_kw(),
-            Token::Protein => { self.advance(); Ok(Expr::Convenience(ConvenienceKeyword::Protein)) }
-            Token::Water => { self.advance(); Ok(Expr::Convenience(ConvenienceKeyword::Water)) }
-            Token::Backbone => { self.advance(); Ok(Expr::Convenience(ConvenienceKeyword::Backbone)) }
-            Token::Sidechain => { self.advance(); Ok(Expr::Convenience(ConvenienceKeyword::Sidechain)) }
-            Token::Hydrogen => { self.advance(); Ok(Expr::Convenience(ConvenienceKeyword::Hydrogen)) }
-            Token::All => { self.advance(); Ok(Expr::Convenience(ConvenienceKeyword::All)) }
-            Token::None_ => { self.advance(); Ok(Expr::Convenience(ConvenienceKeyword::None)) }
+            Token::Protein => {
+                self.advance();
+                Ok(Expr::Convenience(ConvenienceKeyword::Protein))
+            }
+            Token::Water => {
+                self.advance();
+                Ok(Expr::Convenience(ConvenienceKeyword::Water))
+            }
+            Token::Backbone => {
+                self.advance();
+                Ok(Expr::Convenience(ConvenienceKeyword::Backbone))
+            }
+            Token::Sidechain => {
+                self.advance();
+                Ok(Expr::Convenience(ConvenienceKeyword::Sidechain))
+            }
+            Token::Hydrogen => {
+                self.advance();
+                Ok(Expr::Convenience(ConvenienceKeyword::Hydrogen))
+            }
+            Token::All => {
+                self.advance();
+                Ok(Expr::Convenience(ConvenienceKeyword::All))
+            }
+            Token::None_ => {
+                self.advance();
+                Ok(Expr::Convenience(ConvenienceKeyword::None))
+            }
             _ => {
                 let span = self.current_span();
                 Err(SelectionError::new(format!(
-                    "Expected selection expression, found {:?}", self.current().token
-                )).with_span(span.0, span.1).with_input(self.input.clone()))
+                    "Expected selection expression, found {:?}",
+                    self.current().token
+                ))
+                .with_span(span.0, span.1)
+                .with_input(self.input.clone()))
             }
         }
     }
@@ -125,17 +158,29 @@ impl Parser {
     fn parse_within(&mut self) -> Result<Expr, SelectionError> {
         self.advance(); // consume 'within'
         let distance = match &self.current().token {
-            Token::Float(f) => { let v = *f; self.advance(); v }
-            Token::Integer(i) => { let v = *i as f64; self.advance(); v }
+            Token::Float(f) => {
+                let v = *f;
+                self.advance();
+                v
+            }
+            Token::Integer(i) => {
+                let v = *i as f64;
+                self.advance();
+                v
+            }
             _ => {
                 let span = self.current_span();
                 return Err(SelectionError::new("Expected distance after 'within'")
-                    .with_span(span.0, span.1).with_input(self.input.clone()));
+                    .with_span(span.0, span.1)
+                    .with_input(self.input.clone()));
             }
         };
         self.expect(&Token::Of)?;
         let inner = self.parse_atom()?;
-        Ok(Expr::Within { distance, inner: Box::new(inner) })
+        Ok(Expr::Within {
+            distance,
+            inner: Box::new(inner),
+        })
     }
 
     // string_kw string_arg
@@ -165,7 +210,8 @@ impl Parser {
             _ => {
                 let span = self.current_span();
                 Err(SelectionError::new("Expected identifier after keyword")
-                    .with_span(span.0, span.1).with_input(self.input.clone()))
+                    .with_span(span.0, span.1)
+                    .with_input(self.input.clone()))
             }
         }
     }
@@ -192,12 +238,23 @@ impl Parser {
         };
 
         let value = match &self.current().token {
-            Token::Float(f) => { let v = *f; self.advance(); v }
-            Token::Integer(i) => { let v = *i as f64; self.advance(); v }
+            Token::Float(f) => {
+                let v = *f;
+                self.advance();
+                v
+            }
+            Token::Integer(i) => {
+                let v = *i as f64;
+                self.advance();
+                v
+            }
             _ => {
                 let span = self.current_span();
-                return Err(SelectionError::new("Expected number after comparison operator")
-                    .with_span(span.0, span.1).with_input(self.input.clone()));
+                return Err(
+                    SelectionError::new("Expected number after comparison operator")
+                        .with_span(span.0, span.1)
+                        .with_input(self.input.clone()),
+                );
             }
         };
         let value = if negative { -value } else { value };
@@ -214,8 +271,11 @@ impl Parser {
             Token::Ne => CmpOp::Ne,
             _ => {
                 let span = self.current_span();
-                return Err(SelectionError::new("Expected comparison operator (>, <, >=, <=, ==, !=)")
-                    .with_span(span.0, span.1).with_input(self.input.clone()));
+                return Err(SelectionError::new(
+                    "Expected comparison operator (>, <, >=, <=, ==, !=)",
+                )
+                .with_span(span.0, span.1)
+                .with_input(self.input.clone()));
             }
         };
         self.advance();
@@ -259,11 +319,16 @@ impl Parser {
 
     fn expect_int(&mut self) -> Result<i64, SelectionError> {
         match &self.current().token {
-            Token::Integer(i) => { let v = *i; self.advance(); Ok(v) }
+            Token::Integer(i) => {
+                let v = *i;
+                self.advance();
+                Ok(v)
+            }
             _ => {
                 let span = self.current_span();
                 Err(SelectionError::new("Expected integer")
-                    .with_span(span.0, span.1).with_input(self.input.clone()))
+                    .with_span(span.0, span.1)
+                    .with_input(self.input.clone()))
             }
         }
     }
@@ -284,7 +349,13 @@ mod tests {
     #[test]
     fn test_parse_name() {
         let expr = parse_selection("name CA").unwrap();
-        assert!(matches!(expr, Expr::NameMatch { field: StringField::Name, .. }));
+        assert!(matches!(
+            expr,
+            Expr::NameMatch {
+                field: StringField::Name,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -311,13 +382,26 @@ mod tests {
     #[test]
     fn test_parse_resid_range() {
         let expr = parse_selection("resid 1-10").unwrap();
-        assert!(matches!(expr, Expr::RangeSelect { field: RangeField::Resid, .. }));
+        assert!(matches!(
+            expr,
+            Expr::RangeSelect {
+                field: RangeField::Resid,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn test_parse_numeric() {
         let expr = parse_selection("mass > 12.0").unwrap();
-        assert!(matches!(expr, Expr::NumericCmp { field: NumericField::Mass, op: CmpOp::Gt, .. }));
+        assert!(matches!(
+            expr,
+            Expr::NumericCmp {
+                field: NumericField::Mass,
+                op: CmpOp::Gt,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -338,9 +422,18 @@ mod tests {
 
     #[test]
     fn test_parse_convenience() {
-        assert!(matches!(parse_selection("protein").unwrap(), Expr::Convenience(ConvenienceKeyword::Protein)));
-        assert!(matches!(parse_selection("water").unwrap(), Expr::Convenience(ConvenienceKeyword::Water)));
-        assert!(matches!(parse_selection("all").unwrap(), Expr::Convenience(ConvenienceKeyword::All)));
+        assert!(matches!(
+            parse_selection("protein").unwrap(),
+            Expr::Convenience(ConvenienceKeyword::Protein)
+        ));
+        assert!(matches!(
+            parse_selection("water").unwrap(),
+            Expr::Convenience(ConvenienceKeyword::Water)
+        ));
+        assert!(matches!(
+            parse_selection("all").unwrap(),
+            Expr::Convenience(ConvenienceKeyword::All)
+        ));
     }
 
     #[test]

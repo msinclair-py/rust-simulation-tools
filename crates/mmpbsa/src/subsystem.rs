@@ -28,15 +28,30 @@ pub fn extract_subtopology(topology: &AmberTopology, atom_indices: &[usize]) -> 
     }
 
     // Subset per-atom arrays
-    let atom_names: Vec<String> = atom_indices.iter().map(|&i| topology.atom_names[i].clone()).collect();
-    let atom_type_indices: Vec<usize> = atom_indices.iter().map(|&i| topology.atom_type_indices[i]).collect();
+    let atom_names: Vec<String> = atom_indices
+        .iter()
+        .map(|&i| topology.atom_names[i].clone())
+        .collect();
+    let atom_type_indices: Vec<usize> = atom_indices
+        .iter()
+        .map(|&i| topology.atom_type_indices[i])
+        .collect();
     let charges: Vec<f64> = atom_indices.iter().map(|&i| topology.charges[i]).collect();
-    let charges_amber: Vec<f64> = atom_indices.iter().map(|&i| topology.charges_amber[i]).collect();
+    let charges_amber: Vec<f64> = atom_indices
+        .iter()
+        .map(|&i| topology.charges_amber[i])
+        .collect();
     let masses: Vec<f64> = atom_indices.iter().map(|&i| topology.masses[i]).collect();
     let radii: Vec<f64> = atom_indices.iter().map(|&i| topology.radii[i]).collect();
     let screen: Vec<f64> = atom_indices.iter().map(|&i| topology.screen[i]).collect();
-    let atom_sigmas: Vec<f64> = atom_indices.iter().map(|&i| topology.atom_sigmas[i]).collect();
-    let atom_epsilons: Vec<f64> = atom_indices.iter().map(|&i| topology.atom_epsilons[i]).collect();
+    let atom_sigmas: Vec<f64> = atom_indices
+        .iter()
+        .map(|&i| topology.atom_sigmas[i])
+        .collect();
+    let atom_epsilons: Vec<f64> = atom_indices
+        .iter()
+        .map(|&i| topology.atom_epsilons[i])
+        .collect();
 
     // Build residue information for the subset
     let atom_res = topology.atom_residue_indices();
@@ -66,11 +81,9 @@ pub fn extract_subtopology(topology: &AmberTopology, atom_indices: &[usize]) -> 
     // Filter and re-index angles
     let mut sub_angles = Vec::new();
     for &(a, b, c, t) in &topology.angles {
-        if let (Some(&na), Some(&nb), Some(&nc)) = (
-            old_to_new.get(&a),
-            old_to_new.get(&b),
-            old_to_new.get(&c),
-        ) {
+        if let (Some(&na), Some(&nb), Some(&nc)) =
+            (old_to_new.get(&a), old_to_new.get(&b), old_to_new.get(&c))
+        {
             sub_angles.push((na, nb, nc, t));
         }
     }
@@ -174,7 +187,9 @@ mod tests {
 
         // Extract first 10 residues as "receptor"
         let res_indices: Vec<usize> = (0..10).collect();
-        let selection = top.build_selection(&res_indices).expect("build_selection failed");
+        let selection = top
+            .build_selection(&res_indices)
+            .expect("build_selection failed");
         let sub = extract_subtopology(&top, &selection.atom_indices);
 
         assert_eq!(sub.n_atoms, selection.atom_indices.len());

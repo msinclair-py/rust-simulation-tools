@@ -11,9 +11,9 @@ use crate::mdcrd::MdcrdReader;
 use crate::mm_energy::{build_14_pairs, build_exclusion_set, compute_mm_energy_with_nb};
 use crate::sa_energy::{compute_sa_energy, SaParams};
 use crate::subsystem::{extract_coords, extract_subtopology};
+use rayon::prelude::*;
 use rst_core::amber::prmtop::AmberTopology;
 use rst_core::trajectory::dcd::DcdReader;
-use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -222,19 +222,34 @@ fn compute_frame_energy(
     nb_sets: &PrebuiltNbSets,
 ) -> FrameEnergy {
     // Complex energies
-    let c_mm = compute_mm_energy_with_nb(complex_top, coords, &nb_sets.complex_excluded, &nb_sets.complex_14);
+    let c_mm = compute_mm_energy_with_nb(
+        complex_top,
+        coords,
+        &nb_sets.complex_excluded,
+        &nb_sets.complex_14,
+    );
     let c_gb = compute_gb_energy(complex_top, coords, gb_params);
     let c_sa = compute_sa_energy(complex_top, coords, sa_params);
 
     // Receptor energies (extract coordinates)
     let r_coords = extract_coords(coords, receptor_atoms);
-    let r_mm = compute_mm_energy_with_nb(receptor_top, &r_coords, &nb_sets.receptor_excluded, &nb_sets.receptor_14);
+    let r_mm = compute_mm_energy_with_nb(
+        receptor_top,
+        &r_coords,
+        &nb_sets.receptor_excluded,
+        &nb_sets.receptor_14,
+    );
     let r_gb = compute_gb_energy(receptor_top, &r_coords, gb_params);
     let r_sa = compute_sa_energy(receptor_top, &r_coords, sa_params);
 
     // Ligand energies
     let l_coords = extract_coords(coords, ligand_atoms);
-    let l_mm = compute_mm_energy_with_nb(ligand_top, &l_coords, &nb_sets.ligand_excluded, &nb_sets.ligand_14);
+    let l_mm = compute_mm_energy_with_nb(
+        ligand_top,
+        &l_coords,
+        &nb_sets.ligand_excluded,
+        &nb_sets.ligand_14,
+    );
     let l_gb = compute_gb_energy(ligand_top, &l_coords, gb_params);
     let l_sa = compute_sa_energy(ligand_top, &l_coords, sa_params);
 
@@ -321,7 +336,11 @@ pub fn compute_binding_energy(
 ) -> Result<BindingResult, String> {
     // Derive the complex as the union of receptor + ligand residues.
     let (effective_complex_top, complex_atom_indices, receptor_sel, ligand_sel) =
-        build_complex_subsystem(complex_top, &config.receptor_residues, &config.ligand_residues)?;
+        build_complex_subsystem(
+            complex_top,
+            &config.receptor_residues,
+            &config.ligand_residues,
+        )?;
 
     // Build sub-topologies relative to the (possibly extracted) complex topology.
     let receptor_top = extract_subtopology(&effective_complex_top, &receptor_sel.atom_indices);
@@ -357,8 +376,7 @@ pub fn compute_binding_energy(
 
     match &config.trajectory_format {
         TrajectoryFormat::Mdcrd { has_box } => {
-            let mut reader =
-                MdcrdReader::open(trajectory_path, complex_top.n_atoms, *has_box)?;
+            let mut reader = MdcrdReader::open(trajectory_path, complex_top.n_atoms, *has_box)?;
             let mut frame_idx: usize = 0;
             while let Some(coords) = reader.read_frame()? {
                 if frame_idx >= end_frame {
@@ -488,7 +506,11 @@ pub fn compute_binding_energy_single_frame(
     config: &BindingConfig,
 ) -> Result<FrameEnergy, String> {
     let (effective_complex_top, complex_atom_indices, receptor_sel, ligand_sel) =
-        build_complex_subsystem(complex_top, &config.receptor_residues, &config.ligand_residues)?;
+        build_complex_subsystem(
+            complex_top,
+            &config.receptor_residues,
+            &config.ligand_residues,
+        )?;
 
     let complex_coords = slice_frame_to_complex(coords, &complex_atom_indices);
 
@@ -531,8 +553,8 @@ mod tests {
             return;
         }
 
-        let top = rst_core::amber::prmtop::parse_prmtop(prmtop_path)
-            .expect("Failed to parse prmtop");
+        let top =
+            rst_core::amber::prmtop::parse_prmtop(prmtop_path).expect("Failed to parse prmtop");
 
         // Read first frame
         let mut reader =

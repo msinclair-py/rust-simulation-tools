@@ -14,12 +14,12 @@
 //!     --ligand-residues 166-240
 //! ```
 
+use rst_core::amber::prmtop::parse_prmtop;
 use rst_mmpbsa::binding::{compute_binding_energy, BindingConfig, BindingResult, TrajectoryFormat};
 use rst_mmpbsa::decomposition::decompose_binding_energy;
 use rst_mmpbsa::entropy::interaction_entropy;
 use rst_mmpbsa::gb_energy::{GbModel, GbParams};
 use rst_mmpbsa::sa_energy::SaParams;
-use rst_core::amber::prmtop::parse_prmtop;
 use std::path::Path;
 
 fn main() {
@@ -74,7 +74,7 @@ fn main() {
         sa_params: SaParams {
             surface_tension: 0.0072, // kcal/(mol·Å²)
             offset: 0.0,
-            probe_radius: 1.4,       // Å
+            probe_radius: 1.4, // Å
             n_sphere_points: 960,
         },
         trajectory_format: TrajectoryFormat::Mdcrd { has_box: false },
@@ -87,36 +87,43 @@ fn main() {
     // 4. Run the binding free energy calculation over the trajectory
     // -------------------------------------------------------------------------
     println!("\nRunning MM-GBSA calculation...");
-    let result: BindingResult =
-        compute_binding_energy(&topology, Path::new(&mdcrd_path), &config)
-            .expect("Binding energy calculation failed");
+    let result: BindingResult = compute_binding_energy(&topology, Path::new(&mdcrd_path), &config)
+        .expect("Binding energy calculation failed");
 
     // -------------------------------------------------------------------------
     // 5. Print summary statistics
     // -------------------------------------------------------------------------
     println!("\n{}", "=".repeat(60));
-    println!("MM-GBSA Binding Free Energy Results ({} frames)", result.frames.len());
+    println!(
+        "MM-GBSA Binding Free Energy Results ({} frames)",
+        result.frames.len()
+    );
     println!("{}", "=".repeat(60));
     println!(
         "{:<20} {:>12} kcal/mol",
-        "ΔE(MM)", format!("{:.2}", result.mean_delta_mm)
+        "ΔE(MM)",
+        format!("{:.2}", result.mean_delta_mm)
     );
     println!(
         "{:<20} {:>12} kcal/mol",
-        "ΔG(GB)", format!("{:.2}", result.mean_delta_gb)
+        "ΔG(GB)",
+        format!("{:.2}", result.mean_delta_gb)
     );
     println!(
         "{:<20} {:>12} kcal/mol",
-        "ΔG(SA)", format!("{:.2}", result.mean_delta_sa)
+        "ΔG(SA)",
+        format!("{:.2}", result.mean_delta_sa)
     );
     println!("{}", "-".repeat(60));
     println!(
         "{:<20} {:>12} kcal/mol",
-        "ΔG(total)", format!("{:.2}", result.mean_delta_total)
+        "ΔG(total)",
+        format!("{:.2}", result.mean_delta_total)
     );
     println!(
         "{:<20} {:>12} kcal/mol",
-        "σ(ΔG)", format!("{:.2}", result.std_delta_total)
+        "σ(ΔG)",
+        format!("{:.2}", result.std_delta_total)
     );
 
     // -------------------------------------------------------------------------
@@ -126,7 +133,8 @@ fn main() {
         println!();
         println!(
             "{:<20} {:>12} kcal/mol",
-            "-TΔS(IE)", format!("{:.2}", entropy.minus_tds)
+            "-TΔS(IE)",
+            format!("{:.2}", entropy.minus_tds)
         );
         println!(
             "{:<20} {:>12} kcal/mol",
@@ -156,9 +164,7 @@ fn main() {
 
     // Print top contributing receptor residues (sorted by |total|)
     let mut receptor_contribs = decomp.receptor_residues.clone();
-    receptor_contribs.sort_by(|a, b| {
-        b.total().abs().partial_cmp(&a.total().abs()).unwrap()
-    });
+    receptor_contribs.sort_by(|a, b| b.total().abs().partial_cmp(&a.total().abs()).unwrap());
 
     println!(
         "\n{:<6} {:<8} {:>8} {:>8} {:>8} {:>8} {:>10}",
@@ -181,9 +187,7 @@ fn main() {
 
     // Print top contributing ligand residues
     let mut ligand_contribs = decomp.ligand_residues.clone();
-    ligand_contribs.sort_by(|a, b| {
-        b.total().abs().partial_cmp(&a.total().abs()).unwrap()
-    });
+    ligand_contribs.sort_by(|a, b| b.total().abs().partial_cmp(&a.total().abs()).unwrap());
 
     println!("\nTop ligand residues:");
     println!(
@@ -283,7 +287,10 @@ fn parse_args(args: &[String]) -> (String, String, Vec<usize>, Vec<usize>) {
 fn parse_residue_range(s: &str) -> Vec<usize> {
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 2 {
-        eprintln!("Expected residue range as START-END (e.g., 0-165), got: {}", s);
+        eprintln!(
+            "Expected residue range as START-END (e.g., 0-165), got: {}",
+            s
+        );
         std::process::exit(1);
     }
     let start: usize = parts[0].parse().expect("Invalid start residue");

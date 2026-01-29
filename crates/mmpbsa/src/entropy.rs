@@ -62,15 +62,12 @@ pub fn interaction_entropy(frames: &[FrameEnergy], temperature: f64) -> Option<E
     let mean_de: f64 = frames.iter().map(|f| f.delta_mm).sum::<f64>() / n as f64;
 
     // Compute <exp(ΔE_int / kT)> using the log-sum-exp trick for numerical stability
-    let exponents: Vec<f64> = frames
-        .iter()
-        .map(|f| (f.delta_mm - mean_de) / kt)
-        .collect();
+    let exponents: Vec<f64> = frames.iter().map(|f| (f.delta_mm - mean_de) / kt).collect();
 
     let max_exp = exponents.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-    let log_mean_exp = max_exp
-        + (exponents.iter().map(|&x| (x - max_exp).exp()).sum::<f64>() / n as f64).ln();
+    let log_mean_exp =
+        max_exp + (exponents.iter().map(|&x| (x - max_exp).exp()).sum::<f64>() / n as f64).ln();
 
     let minus_tds = kt * log_mean_exp;
 
@@ -351,9 +348,7 @@ mod tests {
     #[test]
     fn test_jacobi_eigenvalues_identity() {
         // 3x3 identity matrix → eigenvalues all 1.0
-        let mut mat = vec![
-            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
-        ];
+        let mut mat = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         let eigs = jacobi_eigenvalues(&mut mat, 3);
         for &e in &eigs {
             assert!((e - 1.0).abs() < 1e-10, "eigenvalue = {}", e);
@@ -373,10 +368,7 @@ mod tests {
     fn test_quasi_harmonic_single_mode() {
         // Two frames of a single atom oscillating in x
         let masses = vec![12.0]; // carbon
-        let trajectories = vec![
-            vec![[1.0, 0.0, 0.0]],
-            vec![[-1.0, 0.0, 0.0]],
-        ];
+        let trajectories = vec![vec![[1.0, 0.0, 0.0]], vec![[-1.0, 0.0, 0.0]]];
 
         let result = quasi_harmonic_entropy(&trajectories, &masses, 298.15);
         assert!(result.is_some());

@@ -199,9 +199,8 @@ impl CellList {
                         continue;
                     }
 
-                    let cell_idx = cx as usize
-                        + cy as usize * self.nx
-                        + cz as usize * self.nx * self.ny;
+                    let cell_idx =
+                        cx as usize + cy as usize * self.nx + cz as usize * self.nx * self.ny;
 
                     // Check all particles in this cell
                     for &particle_idx in &self.cells[cell_idx] {
@@ -251,10 +250,7 @@ impl PartnerData {
             .map(|&idx| all_charges[idx])
             .collect();
 
-        let sigmas: Vec<f64> = partner_indices
-            .iter()
-            .map(|&idx| all_sigmas[idx])
-            .collect();
+        let sigmas: Vec<f64> = partner_indices.iter().map(|&idx| all_sigmas[idx]).collect();
 
         let epsilons: Vec<f64> = partner_indices
             .iter()
@@ -495,11 +491,7 @@ mod tests {
 
     #[test]
     fn test_cell_list_creation() {
-        let positions = vec![
-            [0.0, 0.0, 0.0],
-            [0.5, 0.5, 0.5],
-            [1.0, 1.0, 1.0],
-        ];
+        let positions = vec![[0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [1.0, 1.0, 1.0]];
 
         let cell_list = CellList::new(&positions, 1.0);
         assert!(cell_list.nx > 0);
@@ -509,11 +501,7 @@ mod tests {
 
     #[test]
     fn test_cell_list_find_neighbors() {
-        let positions = vec![
-            [0.0, 0.0, 0.0],
-            [0.5, 0.0, 0.0],
-            [2.0, 0.0, 0.0],
-        ];
+        let positions = vec![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [2.0, 0.0, 0.0]];
 
         let cell_list = CellList::new(&positions, 1.0);
         let mut neighbors = Vec::new();

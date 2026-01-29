@@ -93,15 +93,30 @@ impl<'a> Lexer<'a> {
             self.skip_whitespace();
             let start = self.pos;
             if self.pos >= self.bytes.len() {
-                tokens.push(SpannedToken { token: Token::Eof, span: (start, start) });
+                tokens.push(SpannedToken {
+                    token: Token::Eof,
+                    span: (start, start),
+                });
                 break;
             }
             let ch = self.bytes[self.pos];
             let token = match ch {
-                b'(' => { self.pos += 1; Token::LParen }
-                b')' => { self.pos += 1; Token::RParen }
-                b',' => { self.pos += 1; Token::Comma }
-                b':' => { self.pos += 1; Token::Colon }
+                b'(' => {
+                    self.pos += 1;
+                    Token::LParen
+                }
+                b')' => {
+                    self.pos += 1;
+                    Token::RParen
+                }
+                b',' => {
+                    self.pos += 1;
+                    Token::Comma
+                }
+                b':' => {
+                    self.pos += 1;
+                    Token::Colon
+                }
                 b'>' => {
                     self.pos += 1;
                     if self.pos < self.bytes.len() && self.bytes[self.pos] == b'=' {
@@ -138,12 +153,18 @@ impl<'a> Lexer<'a> {
                         return Err(self.err("Expected '!=' operator", start));
                     }
                 }
-                b'-' => { self.pos += 1; Token::Dash }
+                b'-' => {
+                    self.pos += 1;
+                    Token::Dash
+                }
                 b'0'..=b'9' => self.lex_number()?,
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'*' | b'?' => self.lex_word()?,
                 _ => return Err(self.err(format!("Unexpected character '{}'", ch as char), start)),
             };
-            tokens.push(SpannedToken { token, span: (start, self.pos) });
+            tokens.push(SpannedToken {
+                token,
+                span: (start, self.pos),
+            });
         }
         Ok(tokens)
     }
@@ -159,11 +180,15 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
             }
             let s = &self.input[start..self.pos];
-            let val: f64 = s.parse().map_err(|_| self.err(format!("Invalid float '{}'", s), start))?;
+            let val: f64 = s
+                .parse()
+                .map_err(|_| self.err(format!("Invalid float '{}'", s), start))?;
             Ok(Token::Float(val))
         } else {
             let s = &self.input[start..self.pos];
-            let val: i64 = s.parse().map_err(|_| self.err(format!("Invalid integer '{}'", s), start))?;
+            let val: i64 = s
+                .parse()
+                .map_err(|_| self.err(format!("Invalid integer '{}'", s), start))?;
             Ok(Token::Integer(val))
         }
     }

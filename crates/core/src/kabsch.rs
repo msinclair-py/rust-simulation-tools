@@ -44,14 +44,16 @@ pub fn compute_kabsch_rotation(
     }
 
     let mat = nalgebra::Matrix3::new(
-        h[0][0], h[0][1], h[0][2],
-        h[1][0], h[1][1], h[1][2],
-        h[2][0], h[2][1], h[2][2],
+        h[0][0], h[0][1], h[0][2], h[1][0], h[1][1], h[1][2], h[2][0], h[2][1], h[2][2],
     );
 
     let svd = nalgebra::SVD::new(mat, true, true);
-    let u = svd.u.ok_or_else(|| "SVD decomposition failed: no U matrix".to_string())?;
-    let v_t = svd.v_t.ok_or_else(|| "SVD decomposition failed: no V^T matrix".to_string())?;
+    let u = svd
+        .u
+        .ok_or_else(|| "SVD decomposition failed: no U matrix".to_string())?;
+    let v_t = svd
+        .v_t
+        .ok_or_else(|| "SVD decomposition failed: no V^T matrix".to_string())?;
     let v = v_t.transpose();
     let mut r = v * u.transpose();
 
@@ -88,7 +90,13 @@ pub fn kabsch_align(
     let ref_centroid = compute_centroid(&ref_align);
     let ref_centered: Vec<[f64; 3]> = ref_align
         .iter()
-        .map(|p| [p[0] - ref_centroid[0], p[1] - ref_centroid[1], p[2] - ref_centroid[2]])
+        .map(|p| {
+            [
+                p[0] - ref_centroid[0],
+                p[1] - ref_centroid[1],
+                p[2] - ref_centroid[2],
+            ]
+        })
         .collect();
 
     trajectory
@@ -108,9 +116,18 @@ pub fn kabsch_align(
                     frame[atom_idx][2] - mobile_centroid[2],
                 ];
                 aligned.push([
-                    rotation[0][0] * centered[0] + rotation[0][1] * centered[1] + rotation[0][2] * centered[2] + ref_centroid[0],
-                    rotation[1][0] * centered[0] + rotation[1][1] * centered[1] + rotation[1][2] * centered[2] + ref_centroid[1],
-                    rotation[2][0] * centered[0] + rotation[2][1] * centered[1] + rotation[2][2] * centered[2] + ref_centroid[2],
+                    rotation[0][0] * centered[0]
+                        + rotation[0][1] * centered[1]
+                        + rotation[0][2] * centered[2]
+                        + ref_centroid[0],
+                    rotation[1][0] * centered[0]
+                        + rotation[1][1] * centered[1]
+                        + rotation[1][2] * centered[2]
+                        + ref_centroid[1],
+                    rotation[2][0] * centered[0]
+                        + rotation[2][1] * centered[1]
+                        + rotation[2][2] * centered[2]
+                        + ref_centroid[2],
                 ]);
             }
             aligned

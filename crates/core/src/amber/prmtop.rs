@@ -588,22 +588,35 @@ pub fn parse_prmtop<P: AsRef<Path>>(path: P) -> Result<AmberTopology, String> {
     }
 
     // Parse per-atom properties
-    let masses = parser.parse_floats("MASS").unwrap_or_else(|_| vec![0.0; n_atoms]);
-    let radii = parser.parse_floats("RADII").unwrap_or_else(|_| vec![0.0; n_atoms]);
-    let screen = parser.parse_floats("SCREEN").unwrap_or_else(|_| vec![0.0; n_atoms]);
+    let masses = parser
+        .parse_floats("MASS")
+        .unwrap_or_else(|_| vec![0.0; n_atoms]);
+    let radii = parser
+        .parse_floats("RADII")
+        .unwrap_or_else(|_| vec![0.0; n_atoms]);
+    let screen = parser
+        .parse_floats("SCREEN")
+        .unwrap_or_else(|_| vec![0.0; n_atoms]);
 
     // Parse bond parameters
-    let bond_force_constants = parser.parse_floats("BOND_FORCE_CONSTANT").unwrap_or_default();
+    let bond_force_constants = parser
+        .parse_floats("BOND_FORCE_CONSTANT")
+        .unwrap_or_default();
     let bond_equil_values = parser.parse_floats("BOND_EQUIL_VALUE").unwrap_or_default();
 
     // Parse angle parameters
-    let angle_force_constants = parser.parse_floats("ANGLE_FORCE_CONSTANT").unwrap_or_default();
+    let angle_force_constants = parser
+        .parse_floats("ANGLE_FORCE_CONSTANT")
+        .unwrap_or_default();
     let angle_equil_values = parser.parse_floats("ANGLE_EQUIL_VALUE").unwrap_or_default();
 
     // Parse dihedral parameters
-    let dihedral_force_constants =
-        parser.parse_floats("DIHEDRAL_FORCE_CONSTANT").unwrap_or_default();
-    let dihedral_periodicities = parser.parse_floats("DIHEDRAL_PERIODICITY").unwrap_or_default();
+    let dihedral_force_constants = parser
+        .parse_floats("DIHEDRAL_FORCE_CONSTANT")
+        .unwrap_or_default();
+    let dihedral_periodicities = parser
+        .parse_floats("DIHEDRAL_PERIODICITY")
+        .unwrap_or_default();
     let dihedral_phases = parser.parse_floats("DIHEDRAL_PHASE").unwrap_or_default();
 
     // Parse angles (quads: i*3, j*3, k*3, type_index)
@@ -629,10 +642,7 @@ pub fn parse_prmtop<P: AsRef<Path>>(path: P) -> Result<AmberTopology, String> {
     // Parse dihedrals (quints: i*3, j*3, k*3, l*3, type_index)
     // Negative k → improper torsion (skip 1-4), negative l → multi-term (skip 1-4)
     let mut dihedrals = Vec::new();
-    for section in &[
-        "DIHEDRALS_INC_HYDROGEN",
-        "DIHEDRALS_WITHOUT_HYDROGEN",
-    ] {
+    for section in &["DIHEDRALS_INC_HYDROGEN", "DIHEDRALS_WITHOUT_HYDROGEN"] {
         if let Ok(raw) = parser.parse_integers(section) {
             for chunk in raw.chunks(5) {
                 if chunk.len() == 5 {

@@ -24,8 +24,7 @@ impl MdcrdReader {
     /// * `n_atoms` - Number of atoms (must be known from the topology)
     /// * `has_box` - Whether the trajectory contains box dimensions
     pub fn open<P: AsRef<Path>>(path: P, n_atoms: usize, has_box: bool) -> Result<Self, String> {
-        let file =
-            File::open(path.as_ref()).map_err(|e| format!("Failed to open mdcrd: {}", e))?;
+        let file = File::open(path.as_ref()).map_err(|e| format!("Failed to open mdcrd: {}", e))?;
         let mut reader = BufReader::new(file);
 
         // Skip title line
@@ -92,11 +91,7 @@ impl MdcrdReader {
         // Convert flat values to [f64; 3] coordinates (skip box if present)
         let mut coords = Vec::with_capacity(self.n_atoms);
         for i in 0..self.n_atoms {
-            coords.push([
-                values[i * 3],
-                values[i * 3 + 1],
-                values[i * 3 + 2],
-            ]);
+            coords.push([values[i * 3], values[i * 3 + 1], values[i * 3 + 2]]);
         }
 
         self.current_frame += 1;

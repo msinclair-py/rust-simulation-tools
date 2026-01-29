@@ -238,7 +238,6 @@ pub fn decompose_binding_energy(
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,7 +290,11 @@ mod tests {
             .iter()
             .chain(result.ligand_residues.iter())
         {
-            assert!(rc.vdw.is_finite(), "res {} vdw not finite", rc.residue_index);
+            assert!(
+                rc.vdw.is_finite(),
+                "res {} vdw not finite",
+                rc.residue_index
+            );
             assert!(
                 rc.elec.is_finite(),
                 "res {} elec not finite",

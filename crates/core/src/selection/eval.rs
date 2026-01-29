@@ -13,11 +13,17 @@ pub struct SelectionContext<'a> {
 
 impl<'a> SelectionContext<'a> {
     pub fn new(topology: &'a AmberTopology) -> Self {
-        Self { topology, coordinates: None }
+        Self {
+            topology,
+            coordinates: None,
+        }
     }
 
     pub fn with_coordinates(topology: &'a AmberTopology, coordinates: &'a [[f64; 3]]) -> Self {
-        Self { topology, coordinates: Some(coordinates) }
+        Self {
+            topology,
+            coordinates: Some(coordinates),
+        }
     }
 
     /// Parse and evaluate a selection expression string, returning sorted atom indices.
@@ -55,7 +61,9 @@ impl<'a> SelectionContext<'a> {
                 for i in 0..n {
                     let value = match field {
                         StringField::Name => self.topology.atom_names[i].trim(),
-                        StringField::Resname => self.topology.residue_labels[residue_indices[i]].trim(),
+                        StringField::Resname => {
+                            self.topology.residue_labels[residue_indices[i]].trim()
+                        }
                         StringField::Type => self.topology.atom_names[i].trim(), // no separate type field
                     };
                     mask[i] = pattern.matches(value);
@@ -82,7 +90,7 @@ impl<'a> SelectionContext<'a> {
                 for i in 0..n {
                     let val = match field {
                         RangeField::Resid => (residue_indices[i] as i64) + 1, // 1-based
-                        RangeField::Index => i as i64, // 0-based
+                        RangeField::Index => i as i64,                        // 0-based
                     };
                     mask[i] = ranges.iter().any(|r| r.contains(val));
                 }
@@ -95,7 +103,8 @@ impl<'a> SelectionContext<'a> {
                 if coords.len() != n {
                     return Err(SelectionError::new(format!(
                         "Coordinate count ({}) doesn't match atom count ({})",
-                        coords.len(), n
+                        coords.len(),
+                        n
                     )));
                 }
                 let inner_mask = self.eval_mask(inner)?;
@@ -104,9 +113,7 @@ impl<'a> SelectionContext<'a> {
                 let mask = within_cell_list(coords, &inner_indices, cutoff_sq, n);
                 Ok(mask)
             }
-            Expr::Convenience(kw) => {
-                self.eval_convenience(*kw)
-            }
+            Expr::Convenience(kw) => self.eval_convenience(*kw),
         }
     }
 
@@ -146,7 +153,11 @@ impl<'a> SelectionContext<'a> {
                 // protein and not backbone
                 let protein = self.eval_convenience(ConvenienceKeyword::Protein)?;
                 let backbone = self.eval_convenience(ConvenienceKeyword::Backbone)?;
-                Ok(protein.iter().zip(backbone.iter()).map(|(&p, &b)| p && !b).collect())
+                Ok(protein
+                    .iter()
+                    .zip(backbone.iter())
+                    .map(|(&p, &b)| p && !b)
+                    .collect())
             }
             ConvenienceKeyword::Hydrogen => {
                 let mut mask = vec![false; n];
@@ -160,7 +171,10 @@ impl<'a> SelectionContext<'a> {
 }
 
 fn mask_to_indices(mask: &[bool]) -> Vec<usize> {
-    mask.iter().enumerate().filter_map(|(i, &b)| if b { Some(i) } else { None }).collect()
+    mask.iter()
+        .enumerate()
+        .filter_map(|(i, &b)| if b { Some(i) } else { None })
+        .collect()
 }
 
 /// Cell-list based spatial query for "within" selections.
@@ -254,8 +268,12 @@ mod tests {
             n_residues: 2,
             n_types: 2,
             atom_names: vec![
-                "N".to_string(), "CA".to_string(), "C".to_string(),
-                "O".to_string(), "H1".to_string(), "H2".to_string(),
+                "N".to_string(),
+                "CA".to_string(),
+                "C".to_string(),
+                "O".to_string(),
+                "H1".to_string(),
+                "H2".to_string(),
             ],
             atom_type_indices: vec![0, 1, 0, 1, 0, 0],
             charges: vec![0.1, -0.2, 0.3, -0.4, 0.5, 0.5],

@@ -8,7 +8,7 @@ pub mod amber;
 pub mod fingerprint;
 pub mod kabsch;
 pub mod sasa;
+pub mod selection;
 pub mod trajectory;
 pub mod util;
-pub mod selection;
 pub mod wrapping;

@@ -6,10 +6,23 @@ pub enum Expr {
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
-    NameMatch { field: StringField, pattern: StringPattern },
-    NumericCmp { field: NumericField, op: CmpOp, value: f64 },
-    RangeSelect { field: RangeField, ranges: Vec<RangeSpec> },
-    Within { distance: f64, inner: Box<Expr> },
+    NameMatch {
+        field: StringField,
+        pattern: StringPattern,
+    },
+    NumericCmp {
+        field: NumericField,
+        op: CmpOp,
+        value: f64,
+    },
+    RangeSelect {
+        field: RangeField,
+        ranges: Vec<RangeSpec>,
+    },
+    Within {
+        distance: f64,
+        inner: Box<Expr>,
+    },
     Convenience(ConvenienceKeyword),
 }
 

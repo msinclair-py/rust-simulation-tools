@@ -35,7 +35,12 @@ impl fmt::Display for SelectionError {
         write!(f, "SelectionError: {}", self.message)?;
         if let (Some((start, end)), Some(input)) = (self.span, &self.input) {
             write!(f, "\n  {}", input)?;
-            write!(f, "\n  {}{}", " ".repeat(start), "^".repeat(end.saturating_sub(start).max(1)))?;
+            write!(
+                f,
+                "\n  {}{}",
+                " ".repeat(start),
+                "^".repeat(end.saturating_sub(start).max(1))
+            )?;
         }
         Ok(())
     }

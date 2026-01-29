@@ -344,12 +344,15 @@ fn read_dcd_header_internal<R: Read + Seek>(reader: &mut R) -> Result<DcdHeader,
         .map_err(|e| format!("Failed to get position: {}", e))?;
 
     // Calculate frame size with overflow checks
-    let coord_size = n_atoms.checked_mul(4)
+    let coord_size = n_atoms
+        .checked_mul(4)
         .ok_or_else(|| format!("Frame size overflow: n_atoms={}", n_atoms))?;
-    let coord_block_size = coord_size.checked_add(8)
+    let coord_block_size = coord_size
+        .checked_add(8)
         .ok_or_else(|| format!("Frame size overflow: coord_size={}", coord_size))?;
     let unit_cell_size = if has_unit_cell { 4 + 48 + 4 } else { 0 }; // 6 doubles
-    let frame_size = coord_block_size.checked_mul(3)
+    let frame_size = coord_block_size
+        .checked_mul(3)
         .and_then(|v| v.checked_add(unit_cell_size))
         .ok_or_else(|| format!("Frame size overflow: coord_block_size={}", coord_block_size))?;
 

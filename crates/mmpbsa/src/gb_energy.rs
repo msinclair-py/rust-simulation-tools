@@ -220,7 +220,11 @@ pub fn compute_gb_energy(
 
     let dielectric_factor =
         -0.5 * (1.0 / params.solute_dielectric - 1.0 / params.solvent_dielectric);
-    let kappa = compute_kappa(params.salt_concentration, params.solvent_dielectric, params.temperature);
+    let kappa = compute_kappa(
+        params.salt_concentration,
+        params.solvent_dielectric,
+        params.temperature,
+    );
 
     // Self-energy terms (O(N), kept serial)
     let mut energy = 0.0;
@@ -387,7 +391,10 @@ mod tests {
         // Verify GB parameters are populated
         assert_eq!(top.radii.len(), top.n_atoms);
         assert_eq!(top.screen.len(), top.n_atoms);
-        assert!(top.radii.iter().all(|&r| r > 0.0), "All radii should be positive");
+        assert!(
+            top.radii.iter().all(|&r| r > 0.0),
+            "All radii should be positive"
+        );
         assert!(
             top.screen.iter().all(|&s| s >= 0.0),
             "All screen params should be non-negative"
