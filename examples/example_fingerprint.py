@@ -30,25 +30,31 @@ def example_fingerprint_session():
 
     # -------------------------------------------------------------------------
     # Fingerprint target residues (default mode)
+    # Return residue names alongside energies for labeling
     # -------------------------------------------------------------------------
     print("=== Target Fingerprints ===")
+    session.return_residue_names = True
+
     target_lj_fps = []
     target_es_fps = []
+    target_resnames = None
 
-    for lj_fp, es_fp in session:
+    for lj_fp, es_fp, resnames in session:
         target_lj_fps.append(lj_fp)
         target_es_fps.append(es_fp)
+        if target_resnames is None:
+            target_resnames = list(resnames)
 
     target_lj_fps = np.array(target_lj_fps)
     target_es_fps = np.array(target_es_fps)
 
     print(f"Per-residue mean LJ energies (kJ/mol):")
-    for i, label in enumerate(session.residue_labels):
-        print(f"  {label}: {np.mean(target_lj_fps[:, i]):.2f}")
+    for i, name in enumerate(target_resnames):
+        print(f"  {name}: {np.mean(target_lj_fps[:, i]):.2f}")
 
     print(f"\nPer-residue mean ES energies (kJ/mol):")
-    for i, label in enumerate(session.residue_labels):
-        print(f"  {label}: {np.mean(target_es_fps[:, i]):.2f}")
+    for i, name in enumerate(target_resnames):
+        print(f"  {name}: {np.mean(target_es_fps[:, i]):.2f}")
 
     print(f"\nTotal target interaction energy: "
           f"LJ={np.sum(target_lj_fps[-1]):.2f}, "
@@ -63,18 +69,21 @@ def example_fingerprint_session():
 
     binder_lj_fps = []
     binder_es_fps = []
+    binder_resnames = None
 
-    for lj_fp, es_fp in session:
+    for lj_fp, es_fp, resnames in session:
         binder_lj_fps.append(lj_fp)
         binder_es_fps.append(es_fp)
+        if binder_resnames is None:
+            binder_resnames = list(resnames)
 
     binder_lj_fps = np.array(binder_lj_fps)
     binder_es_fps = np.array(binder_es_fps)
 
-    print(f"Binder residue count: {len(session.residue_labels)}")
+    print(f"Binder residue count: {len(binder_resnames)}")
     print(f"First 5 binder residues:")
-    for i, label in enumerate(session.residue_labels[:5]):
-        print(f"  {label}: LJ={np.mean(binder_lj_fps[:, i]):.2f}, "
+    for i, name in enumerate(binder_resnames[:5]):
+        print(f"  {name}: LJ={np.mean(binder_lj_fps[:, i]):.2f}, "
               f"ES={np.mean(binder_es_fps[:, i]):.2f}")
 
     print(f"\nTotal binder interaction energy: "

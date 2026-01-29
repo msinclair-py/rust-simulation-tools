@@ -1,19 +1,10 @@
-[package]
-name = "rust-simulation-tools"
-version = "0.2.1"
-edition = "2021"
-
-[lib]
-name = "rust_simulation_tools"
-crate-type = ["cdylib"]
-
-[dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
-numpy = "0.22"
-ndarray = "0.15"
-nalgebra = "0.32"
-rayon = "1.11.0"
-rustc-hash = "2.0"
+[workspace]
+members = [
+    "crates/core",
+    "crates/bindings",
+    "crates/mmpbsa",
+]
+resolver = "2"
 
 [profile.release]
 opt-level = 3

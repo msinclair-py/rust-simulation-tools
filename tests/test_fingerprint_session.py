@@ -192,6 +192,84 @@ class TestFingerprintSessionComputation:
         assert len(binder_labels) == session.n_residues - n_target
 
 
+class TestReturnResidueNames:
+    """Test the return_residue_names feature."""
+
+    @pytest.fixture
+    def configured_session(self):
+        """Return a configured FingerprintSession if test data available."""
+        prmtop_path = DATA_DIR / "amber.prmtop"
+        dcd_path = DATA_DIR / "amber.dcd"
+        if not prmtop_path.exists() or not dcd_path.exists():
+            pytest.skip("AMBER test data not found")
+
+        session = FingerprintSession(str(prmtop_path), str(dcd_path))
+
+        n_target = min(10, session.n_residues // 2)
+        n_binder = session.n_residues - n_target
+        if n_binder < 1:
+            pytest.skip("Not enough residues for target/binder split")
+
+        session.set_target_residues(list(range(n_target)))
+        session.set_binder_residues(list(range(n_target, session.n_residues)))
+
+        return session, n_target, n_binder
+
+    def test_default_is_false(self, configured_session):
+        """Test that return_residue_names defaults to False."""
+        session, _, _ = configured_session
+        assert session.return_residue_names is False
+
+    def test_compute_next_frame_returns_names(self, configured_session):
+        """Test that compute_next_frame returns 3-tuple when enabled."""
+        session, n_target, _ = configured_session
+        session.return_residue_names = True
+
+        result = session.compute_next_frame()
+        assert result is not None
+        lj_fp, es_fp, resnames = result
+
+        assert len(lj_fp) == n_target
+        assert len(es_fp) == n_target
+        assert len(resnames) == n_target
+        assert all(isinstance(name, str) for name in resnames)
+
+    def test_iteration_returns_names(self, configured_session):
+        """Test that iteration yields 3-tuples when enabled."""
+        session, n_target, _ = configured_session
+        session.return_residue_names = True
+
+        for lj_fp, es_fp, resnames in session:
+            assert len(lj_fp) == n_target
+            assert len(es_fp) == n_target
+            assert len(resnames) == n_target
+            assert all(isinstance(name, str) for name in resnames)
+            break  # Only test first frame
+
+    def test_binder_mode_returns_binder_names(self, configured_session):
+        """Test that binder mode returns binder residue names."""
+        session, _, n_binder = configured_session
+        session.return_residue_names = True
+        session.set_fingerprint_mode(FingerprintMode.Binder)
+
+        result = session.compute_next_frame()
+        assert result is not None
+        lj_fp, es_fp, resnames = result
+
+        assert len(resnames) == n_binder
+        assert all(isinstance(name, str) for name in resnames)
+
+    def test_names_match_residue_labels(self, configured_session):
+        """Test that returned names match session.residue_labels."""
+        session, n_target, _ = configured_session
+        session.return_residue_names = True
+
+        _, _, resnames = session.compute_next_frame()
+        expected = session.residue_labels
+
+        assert list(resnames) == list(expected)
+
+
 class TestFingerprintModeComparison:
     """Test that Target and Binder modes produce correct results."""
 

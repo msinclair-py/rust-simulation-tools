@@ -1,0 +1,10 @@
+[package]
+name = "rst-mmpbsa"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rst-core = { path = "../core" }
+rayon = "1.11.0"
+thiserror = "2"
+log = "0.4"

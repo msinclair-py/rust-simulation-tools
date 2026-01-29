@@ -3,15 +3,12 @@
 //! Reads CHARMM/NAMD/X-PLOR DCD binary trajectory format.
 //! Coordinates are converted from Angstrom to nm.
 
-use numpy::ndarray::Array2;
-use numpy::PyArray2;
-use pyo3::prelude::*;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Angstrom to nm conversion factor
-const ANGSTROM_TO_NM: f64 = 0.1;
+pub const ANGSTROM_TO_NM: f64 = 0.1;
 
 // ============================================================================
 // Data Structures
@@ -333,6 +330,12 @@ fn read_dcd_header_internal<R: Read + Seek>(reader: &mut R) -> Result<DcdHeader,
         return Err(format!("Invalid number of atoms: {}", n_atoms_i32));
     }
     let n_atoms = n_atoms_i32 as usize;
+    if n_atoms > 100_000_000 {
+        return Err(format!(
+            "Atom count {} exceeds maximum supported (100,000,000)",
+            n_atoms
+        ));
+    }
     let _block3_end = read_int!(reader);
 
     // Record position for frame data
@@ -340,11 +343,15 @@ fn read_dcd_header_internal<R: Read + Seek>(reader: &mut R) -> Result<DcdHeader,
         .stream_position()
         .map_err(|e| format!("Failed to get position: {}", e))?;
 
-    // Calculate frame size
-    let coord_size = n_atoms * 4; // 4 bytes per float per coordinate
-    let coord_block_size = 4 + coord_size + 4; // block markers + data
+    // Calculate frame size with overflow checks
+    let coord_size = n_atoms.checked_mul(4)
+        .ok_or_else(|| format!("Frame size overflow: n_atoms={}", n_atoms))?;
+    let coord_block_size = coord_size.checked_add(8)
+        .ok_or_else(|| format!("Frame size overflow: coord_size={}", coord_size))?;
     let unit_cell_size = if has_unit_cell { 4 + 48 + 4 } else { 0 }; // 6 doubles
-    let frame_size = unit_cell_size + 3 * coord_block_size;
+    let frame_size = coord_block_size.checked_mul(3)
+        .and_then(|v| v.checked_add(unit_cell_size))
+        .ok_or_else(|| format!("Frame size overflow: coord_block_size={}", coord_block_size))?;
 
     Ok(DcdHeader {
         n_frames,
@@ -451,193 +458,4 @@ pub fn read_dcd_frame<P: AsRef<Path>>(
     reader
         .read_frame()?
         .ok_or_else(|| "Frame not found".to_string())
-}
-
-// ============================================================================
-// Python Interface
-// ============================================================================
-
-/// Python wrapper for DcdReader.
-#[pyclass(name = "DcdReader")]
-pub struct PyDcdReader {
-    inner: DcdReader,
-}
-
-#[pymethods]
-impl PyDcdReader {
-    /// Open a DCD trajectory file.
-    #[new]
-    fn new(path: &str) -> PyResult<Self> {
-        let inner = DcdReader::open(path).map_err(pyo3::exceptions::PyIOError::new_err)?;
-        Ok(Self { inner })
-    }
-
-    /// Number of frames in the trajectory.
-    #[getter]
-    fn n_frames(&self) -> usize {
-        self.inner.n_frames()
-    }
-
-    /// Number of atoms.
-    #[getter]
-    fn n_atoms(&self) -> usize {
-        self.inner.n_atoms()
-    }
-
-    /// Whether unit cell information is present.
-    #[getter]
-    fn has_unit_cell(&self) -> bool {
-        self.inner.header().has_unit_cell
-    }
-
-    /// Current frame index.
-    #[getter]
-    fn current_frame(&self) -> usize {
-        self.inner.current_frame()
-    }
-
-    /// Seek to a specific frame.
-    fn seek(&mut self, frame: usize) -> PyResult<()> {
-        self.inner
-            .seek_frame(frame)
-            .map_err(pyo3::exceptions::PyValueError::new_err)
-    }
-
-    /// Read the next frame.
-    ///
-    /// Returns
-    /// -------
-    /// tuple or None
-    ///     (positions, box_info) where positions is (n_atoms, 3) in nm,
-    ///     and box_info is [a, b, c, alpha, beta, gamma] or None.
-    ///     Returns None if at end of trajectory.
-    fn read_frame<'py>(
-        &mut self,
-        py: Python<'py>,
-    ) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Option<Vec<f64>>)>> {
-        match self.inner.read_frame() {
-            Ok(Some((positions, box_info))) => {
-                let n_atoms = positions.len();
-                let mut flat: Vec<f64> = Vec::with_capacity(n_atoms * 3);
-                for pos in &positions {
-                    flat.extend_from_slice(pos);
-                }
-                let arr = Array2::from_shape_vec((n_atoms, 3), flat).map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!("Shape error: {}", e))
-                })?;
-                let py_arr = PyArray2::from_owned_array_bound(py, arr);
-                let py_box = box_info.map(|b| b.to_vec());
-                Ok(Some((py_arr, py_box)))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(pyo3::exceptions::PyIOError::new_err(e)),
-        }
-    }
-
-    /// Read a specific frame.
-    ///
-    /// Parameters
-    /// ----------
-    /// frame : int
-    ///     Frame index to read.
-    ///
-    /// Returns
-    /// -------
-    /// tuple
-    ///     (positions, box_info) where positions is (n_atoms, 3) in nm.
-    fn read_frame_at<'py>(
-        &mut self,
-        py: Python<'py>,
-        frame: usize,
-    ) -> PyResult<(Bound<'py, PyArray2<f64>>, Option<Vec<f64>>)> {
-        self.inner
-            .seek_frame(frame)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
-
-        match self.inner.read_frame() {
-            Ok(Some((positions, box_info))) => {
-                let n_atoms = positions.len();
-                let mut flat: Vec<f64> = Vec::with_capacity(n_atoms * 3);
-                for pos in &positions {
-                    flat.extend_from_slice(pos);
-                }
-                let arr = Array2::from_shape_vec((n_atoms, 3), flat).map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!("Shape error: {}", e))
-                })?;
-                let py_arr = PyArray2::from_owned_array_bound(py, arr);
-                let py_box = box_info.map(|b| b.to_vec());
-                Ok((py_arr, py_box))
-            }
-            Ok(None) => Err(pyo3::exceptions::PyValueError::new_err("Frame not found")),
-            Err(e) => Err(pyo3::exceptions::PyIOError::new_err(e)),
-        }
-    }
-
-    /// Read all frames into memory.
-    ///
-    /// Returns
-    /// -------
-    /// tuple
-    ///     (positions, boxes) where positions is (n_frames, n_atoms, 3) in nm.
-    fn read_all<'py>(
-        &mut self,
-        py: Python<'py>,
-    ) -> PyResult<(Bound<'py, PyArray2<f64>>, Vec<Option<Vec<f64>>>)> {
-        let (all_positions, all_boxes) = self
-            .inner
-            .read_all_frames()
-            .map_err(pyo3::exceptions::PyIOError::new_err)?;
-
-        let n_frames = all_positions.len();
-        let n_atoms = self.inner.n_atoms();
-
-        // Flatten to (n_frames * n_atoms, 3) for efficiency
-        let mut flat: Vec<f64> = Vec::with_capacity(n_frames * n_atoms * 3);
-        for frame_pos in &all_positions {
-            for pos in frame_pos {
-                flat.extend_from_slice(pos);
-            }
-        }
-
-        let arr = Array2::from_shape_vec((n_frames * n_atoms, 3), flat)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Shape error: {}", e)))?;
-
-        let py_arr = PyArray2::from_owned_array_bound(py, arr);
-        let py_boxes: Vec<Option<Vec<f64>>> = all_boxes
-            .into_iter()
-            .map(|b| b.map(|arr| arr.to_vec()))
-            .collect();
-
-        Ok((py_arr, py_boxes))
-    }
-}
-
-/// Read a DCD trajectory file header.
-///
-/// Parameters
-/// ----------
-/// path : str
-///     Path to the DCD file.
-///
-/// Returns
-/// -------
-/// dict
-///     Header information including n_frames, n_atoms, has_unit_cell, etc.
-#[pyfunction]
-#[pyo3(name = "read_dcd_header")]
-pub fn read_dcd_header_py(path: &str) -> PyResult<pyo3::Py<pyo3::types::PyDict>> {
-    let header = read_dcd_header(path).map_err(pyo3::exceptions::PyIOError::new_err)?;
-
-    Python::with_gil(|py| {
-        let dict = pyo3::types::PyDict::new_bound(py);
-        dict.set_item("n_frames", header.n_frames)?;
-        dict.set_item("n_atoms", header.n_atoms)?;
-        dict.set_item("has_unit_cell", header.has_unit_cell)?;
-        dict.set_item("timestep", header.timestep)?;
-        dict.set_item("start_timestep", header.start_timestep)?;
-        dict.set_item("timestep_interval", header.timestep_interval)?;
-        dict.set_item("is_charmm", header.is_charmm)?;
-        dict.set_item("titles", header.titles)?;
-        Ok(dict.into())
-    })
 }

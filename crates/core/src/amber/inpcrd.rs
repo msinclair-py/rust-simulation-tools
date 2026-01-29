@@ -3,19 +3,15 @@
 //! Parses AMBER coordinate/restart files to extract atomic positions.
 //! Coordinates are converted from Angstrom to nm.
 
-use numpy::ndarray::Array2;
-use numpy::PyArray2;
-use pyo3::prelude::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 /// Angstrom to nm conversion factor
-const ANGSTROM_TO_NM: f64 = 0.1;
+pub const ANGSTROM_TO_NM: f64 = 0.1;
 
 /// Parsed AMBER coordinate data.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AmberCoordinates {
     /// Number of atoms
     pub n_atoms: usize,
@@ -67,7 +63,6 @@ pub fn parse_inpcrd<P: AsRef<Path>>(path: P) -> Result<AmberCoordinates, String>
         .map_err(|e| format!("Failed to parse atom count: {}", e))?;
 
     // Read coordinate values
-    // Format: 12.7f, 6 values per line
     let n_values_needed = n_atoms * 3;
     let mut values: Vec<f64> = Vec::with_capacity(n_values_needed);
     let mut pending_box_line: Option<String> = None;
@@ -83,7 +78,7 @@ pub fn parse_inpcrd<P: AsRef<Path>>(path: P) -> Result<AmberCoordinates, String>
                 let val: f64 = val_str
                     .parse()
                     .map_err(|e| format!("Failed to parse coordinate '{}': {}", val_str, e))?;
-                values.push(val * ANGSTROM_TO_NM); // Convert to nm
+                values.push(val * ANGSTROM_TO_NM);
             }
             pos += 12;
         }
@@ -149,7 +144,6 @@ pub fn parse_inpcrd<P: AsRef<Path>>(path: P) -> Result<AmberCoordinates, String>
         ));
     }
 
-    // Build positions array
     let positions: Vec<[f64; 3]> = values.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
 
     Ok(AmberCoordinates {
@@ -158,45 +152,4 @@ pub fn parse_inpcrd<P: AsRef<Path>>(path: P) -> Result<AmberCoordinates, String>
         box_dimensions: None,
         box_angles: None,
     })
-}
-
-// ============================================================================
-// Python Interface
-// ============================================================================
-
-/// Read an AMBER inpcrd/rst7 coordinate file.
-///
-/// Parameters
-/// ----------
-/// path : str
-///     Path to the inpcrd/rst7 file.
-///
-/// Returns
-/// -------
-/// tuple
-///     (positions, box_dimensions) where:
-///     - positions: ndarray of shape (n_atoms, 3) in nm
-///     - box_dimensions: ndarray of shape (3,) in nm, or None if not present
-#[pyfunction]
-#[pyo3(name = "read_inpcrd")]
-pub fn read_inpcrd_py<'py>(
-    py: Python<'py>,
-    path: &str,
-) -> PyResult<(Bound<'py, PyArray2<f64>>, Option<Vec<f64>>)> {
-    let coords = parse_inpcrd(path).map_err(pyo3::exceptions::PyIOError::new_err)?;
-
-    // Convert to 2D array
-    let n_atoms = coords.n_atoms;
-    let mut flat: Vec<f64> = Vec::with_capacity(n_atoms * 3);
-    for pos in &coords.positions {
-        flat.extend_from_slice(pos);
-    }
-
-    let arr = Array2::from_shape_vec((n_atoms, 3), flat)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Shape error: {}", e)))?;
-
-    let positions = PyArray2::from_owned_array_bound(py, arr);
-    let box_dims = coords.box_dimensions.map(|b| b.to_vec());
-
-    Ok((positions, box_dims))
 }

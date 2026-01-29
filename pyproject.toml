@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rust_simulation_tools"
-version = "0.2.1"
+version = "0.2.2"
 description = "Fast algorithms for MD trajectories"
 readme = "README.md"
 authors = [
@@ -20,6 +20,7 @@ dependencies = ["numpy>=1.20"]
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "rust_simulation_tools"
+manifest-path = "crates/bindings/Cargo.toml"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -30,6 +31,9 @@ addopts = [
     "-v",
     "--strict-markers",
     "--tb=short",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
 
 [tool.coverage.run]

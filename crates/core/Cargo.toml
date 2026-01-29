@@ -1,0 +1,9 @@
+[package]
+name = "rst-core"
+version = "0.2.1"
+edition = "2021"
+
+[dependencies]
+ndarray = "0.15"
+nalgebra = "0.32"
+rayon = "1.11.0"

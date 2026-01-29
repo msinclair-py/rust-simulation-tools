@@ -264,9 +264,8 @@ class TestDcdReader:
 
         positions, boxes = reader.read_all()
 
-        # Positions should be flattened to (n_frames * n_atoms, 3)
-        expected_rows = reader.n_frames * reader.n_atoms
-        assert positions.shape == (expected_rows, 3)
+        # Positions should be (n_frames, n_atoms, 3)
+        assert positions.shape == (reader.n_frames, reader.n_atoms, 3)
 
         # Should have n_frames box entries
         assert len(boxes) == reader.n_frames
