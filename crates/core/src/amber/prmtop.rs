@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::Arc;
 
 // ============================================================================
 // Unit Conversion Constants
@@ -50,9 +51,9 @@ pub struct AmberTopology {
     /// Residue pointers: first atom index (0-based) for each residue
     pub residue_pointers: Vec<usize>,
     /// LJ sigma parameters in nm (per atom type)
-    pub lj_sigma: Vec<f64>,
+    pub lj_sigma: Arc<Vec<f64>>,
     /// LJ epsilon parameters in kJ/mol (per atom type)
-    pub lj_epsilon: Vec<f64>,
+    pub lj_epsilon: Arc<Vec<f64>>,
     /// Per-atom sigma values (looked up from type)
     pub atom_sigmas: Vec<f64>,
     /// Per-atom epsilon values (looked up from type)
@@ -71,17 +72,17 @@ pub struct AmberTopology {
     pub screen: Vec<f64>,
 
     // Bond parameters (indexed by bond type)
-    pub bond_force_constants: Vec<f64>,
-    pub bond_equil_values: Vec<f64>,
+    pub bond_force_constants: Arc<Vec<f64>>,
+    pub bond_equil_values: Arc<Vec<f64>>,
 
     // Angle parameters (indexed by angle type)
-    pub angle_force_constants: Vec<f64>,
-    pub angle_equil_values: Vec<f64>,
+    pub angle_force_constants: Arc<Vec<f64>>,
+    pub angle_equil_values: Arc<Vec<f64>>,
 
     // Dihedral parameters (indexed by dihedral type)
-    pub dihedral_force_constants: Vec<f64>,
-    pub dihedral_periodicities: Vec<f64>,
-    pub dihedral_phases: Vec<f64>,
+    pub dihedral_force_constants: Arc<Vec<f64>>,
+    pub dihedral_periodicities: Arc<Vec<f64>>,
+    pub dihedral_phases: Arc<Vec<f64>>,
 
     // Topology lists
     /// Angles: (atom_i, atom_j, atom_k, type_index) all 0-based
@@ -98,9 +99,9 @@ pub struct AmberTopology {
     pub scnb_scale_factor: f64,
 
     // Raw LJ coefficients
-    pub lj_acoef: Vec<f64>,
-    pub lj_bcoef: Vec<f64>,
-    pub nb_parm_index: Vec<i64>,
+    pub lj_acoef: Arc<Vec<f64>>,
+    pub lj_bcoef: Arc<Vec<f64>>,
+    pub nb_parm_index: Arc<Vec<i64>>,
 }
 
 /// Atom selection grouped by residue for fingerprint calculations.
@@ -670,11 +671,15 @@ pub fn parse_prmtop<P: AsRef<Path>>(path: P) -> Result<AmberTopology, String> {
         .map(|x| x as usize)
         .collect();
 
+    // AMBER uses 1-based indices; a value of 0 is a placeholder meaning
+    // "no excluded atoms" (used when NUMBER_EXCLUDED_ATOMS is 1 but
+    // the atom has no real exclusions).  We convert to 0-based and mark
+    // placeholders with usize::MAX so build_exclusion_set can skip them.
     let excluded_atoms_list: Vec<usize> = parser
         .parse_integers("EXCLUDED_ATOMS_LIST")
         .unwrap_or_default()
         .into_iter()
-        .map(|x| if x > 0 { (x - 1) as usize } else { 0 })
+        .map(|x| if x > 0 { (x - 1) as usize } else { usize::MAX })
         .collect();
 
     // Parse optional 1-4 scaling factors
@@ -699,8 +704,8 @@ pub fn parse_prmtop<P: AsRef<Path>>(path: P) -> Result<AmberTopology, String> {
         charges_amber,
         residue_labels: residue_labels.into_iter().take(n_residues).collect(),
         residue_pointers,
-        lj_sigma,
-        lj_epsilon,
+        lj_sigma: Arc::new(lj_sigma),
+        lj_epsilon: Arc::new(lj_epsilon),
         atom_sigmas,
         atom_epsilons,
         bonds,
@@ -708,21 +713,21 @@ pub fn parse_prmtop<P: AsRef<Path>>(path: P) -> Result<AmberTopology, String> {
         masses,
         radii,
         screen,
-        bond_force_constants,
-        bond_equil_values,
-        angle_force_constants,
-        angle_equil_values,
-        dihedral_force_constants,
-        dihedral_periodicities,
-        dihedral_phases,
+        bond_force_constants: Arc::new(bond_force_constants),
+        bond_equil_values: Arc::new(bond_equil_values),
+        angle_force_constants: Arc::new(angle_force_constants),
+        angle_equil_values: Arc::new(angle_equil_values),
+        dihedral_force_constants: Arc::new(dihedral_force_constants),
+        dihedral_periodicities: Arc::new(dihedral_periodicities),
+        dihedral_phases: Arc::new(dihedral_phases),
         angles,
         dihedrals,
         num_excluded_atoms,
         excluded_atoms_list,
         scee_scale_factor,
         scnb_scale_factor,
-        lj_acoef: acoef,
-        lj_bcoef: bcoef,
-        nb_parm_index,
+        lj_acoef: Arc::new(acoef),
+        lj_bcoef: Arc::new(bcoef),
+        nb_parm_index: Arc::new(nb_parm_index),
     })
 }

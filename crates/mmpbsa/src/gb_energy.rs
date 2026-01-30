@@ -36,6 +36,8 @@ pub struct GbParams {
     pub offset: f64,
     /// Maximum allowed effective Born radius (Å). Default: 25.0.
     pub rgbmax: f64,
+    /// Distance cutoff for pairwise interactions (Å). Default: 12.0.
+    pub cutoff: f64,
 }
 
 impl Default for GbParams {
@@ -48,6 +50,7 @@ impl Default for GbParams {
             temperature: 300.0,
             offset: 0.09,
             rgbmax: 25.0,
+            cutoff: 9999.0,
         }
     }
 }
@@ -59,6 +62,61 @@ pub struct GbEnergy {
     pub total: f64,
     /// Per-atom effective Born radii in Å.
     pub born_radii: Vec<f64>,
+}
+
+/// Cache for Born radii reuse across frames with similar coordinates.
+///
+/// When the RMSD between the current and cached coordinates is below
+/// `rmsd_threshold`, the cached Born radii are reused without recomputation.
+pub struct GbCache {
+    coords: Vec<[f64; 3]>,
+    born_radii: Vec<f64>,
+    rmsd_threshold: f64,
+}
+
+impl GbCache {
+    /// Create a new empty cache with the given RMSD threshold (Angstroms).
+    /// A threshold of 0.5 Angstroms is typical.
+    pub fn new(rmsd_threshold: f64) -> Self {
+        Self {
+            coords: Vec::new(),
+            born_radii: Vec::new(),
+            rmsd_threshold,
+        }
+    }
+
+    /// Check if cached radii can be reused for the given coordinates.
+    fn try_reuse(&self, coords: &[[f64; 3]]) -> Option<&[f64]> {
+        if self.coords.len() != coords.len() || self.coords.is_empty() {
+            return None;
+        }
+        let n = coords.len() as f64;
+        let sum_sq: f64 = self
+            .coords
+            .iter()
+            .zip(coords.iter())
+            .map(|(a, b)| {
+                let dx = a[0] - b[0];
+                let dy = a[1] - b[1];
+                let dz = a[2] - b[2];
+                dx * dx + dy * dy + dz * dz
+            })
+            .sum();
+        let rmsd = (sum_sq / n).sqrt();
+        if rmsd < self.rmsd_threshold {
+            Some(&self.born_radii)
+        } else {
+            None
+        }
+    }
+
+    /// Update the cache with new coordinates and Born radii.
+    fn update(&mut self, coords: &[[f64; 3]], born_radii: &[f64]) {
+        self.coords.clear();
+        self.coords.extend_from_slice(coords);
+        self.born_radii.clear();
+        self.born_radii.extend_from_slice(born_radii);
+    }
 }
 
 /// Compute the Debye-Hückel screening parameter κ in Å⁻¹.
@@ -95,6 +153,7 @@ fn compute_born_radii(
     let rho: Vec<f64> = topology.radii.iter().map(|r| r - offset).collect();
 
     // Compute HCT descreening sum for each atom (parallelized over atoms)
+    let cutoff_sq = params.cutoff * params.cutoff;
     let psi: Vec<f64> = (0..n)
         .into_par_iter()
         .map(|i| {
@@ -109,7 +168,13 @@ fn compute_born_radii(
                 let dx = coords[i][0] - coords[j][0];
                 let dy = coords[i][1] - coords[j][1];
                 let dz = coords[i][2] - coords[j][2];
-                let r = (dx * dx + dy * dy + dz * dz).sqrt();
+                let r2 = dx * dx + dy * dy + dz * dz;
+
+                if r2 > cutoff_sq {
+                    continue;
+                }
+
+                let r = r2.sqrt();
 
                 if r == 0.0 {
                     continue;
@@ -210,14 +275,14 @@ fn compute_born_radii(
 /// Charges are taken from `charges_amber` (AMBER internal units where
 /// q_amber = q_real × 18.2223, so q_i·q_j already yields kcal·Å/mol when
 /// divided by distance).
-pub fn compute_gb_energy(
+/// Compute GB energy given pre-computed Born radii.
+fn compute_gb_energy_from_radii(
     topology: &AmberTopology,
     coords: &[[f64; 3]],
     params: &GbParams,
-) -> GbEnergy {
-    let born_radii = compute_born_radii(topology, coords, params);
+    born_radii: &[f64],
+) -> f64 {
     let n = topology.n_atoms;
-
     let dielectric_factor =
         -0.5 * (1.0 / params.solute_dielectric - 1.0 / params.solvent_dielectric);
     let kappa = compute_kappa(
@@ -225,6 +290,7 @@ pub fn compute_gb_energy(
         params.solvent_dielectric,
         params.temperature,
     );
+    let cutoff_sq = params.cutoff * params.cutoff;
 
     // Self-energy terms (O(N), kept serial)
     let mut energy = 0.0;
@@ -251,6 +317,10 @@ pub fn compute_gb_energy(
                 let dz = coords[i][2] - coords[j][2];
                 let r2 = dx * dx + dy * dy + dz * dz;
 
+                if r2 > cutoff_sq {
+                    continue;
+                }
+
                 let ri_rj = born_radii[i] * born_radii[j];
                 let f_gb = (r2 + ri_rj * (-r2 / (4.0 * ri_rj)).exp()).sqrt();
 
@@ -265,11 +335,39 @@ pub fn compute_gb_energy(
         })
         .sum();
     energy += cross_energy;
+    energy
+}
 
-    GbEnergy {
-        total: energy,
-        born_radii,
+pub fn compute_gb_energy(
+    topology: &AmberTopology,
+    coords: &[[f64; 3]],
+    params: &GbParams,
+) -> GbEnergy {
+    let born_radii = compute_born_radii(topology, coords, params);
+    let total = compute_gb_energy_from_radii(topology, coords, params, &born_radii);
+    GbEnergy { total, born_radii }
+}
+
+/// Compute GB energy with optional Born radii caching.
+///
+/// If `cache` contains radii from a previous frame with similar coordinates
+/// (RMSD < threshold), those radii are reused. Otherwise, radii are
+/// recomputed and the cache is updated.
+pub fn compute_gb_energy_cached(
+    topology: &AmberTopology,
+    coords: &[[f64; 3]],
+    params: &GbParams,
+    cache: &mut GbCache,
+) -> GbEnergy {
+    if let Some(cached_radii) = cache.try_reuse(coords) {
+        let born_radii = cached_radii.to_vec();
+        let total = compute_gb_energy_from_radii(topology, coords, params, &born_radii);
+        return GbEnergy { total, born_radii };
     }
+
+    let result = compute_gb_energy(topology, coords, params);
+    cache.update(coords, &result.born_radii);
+    result
 }
 
 #[cfg(test)]
@@ -294,6 +392,7 @@ mod tests {
     }
 
     fn minimal_topology() -> AmberTopology {
+        use std::sync::Arc;
         AmberTopology {
             n_atoms: 0,
             n_residues: 0,
@@ -304,8 +403,8 @@ mod tests {
             charges_amber: vec![],
             residue_labels: vec![],
             residue_pointers: vec![],
-            lj_sigma: vec![],
-            lj_epsilon: vec![],
+            lj_sigma: Arc::new(vec![]),
+            lj_epsilon: Arc::new(vec![]),
             atom_sigmas: vec![],
             atom_epsilons: vec![],
             bonds: vec![],
@@ -313,22 +412,22 @@ mod tests {
             masses: vec![],
             radii: vec![],
             screen: vec![],
-            bond_force_constants: vec![],
-            bond_equil_values: vec![],
-            angle_force_constants: vec![],
-            angle_equil_values: vec![],
-            dihedral_force_constants: vec![],
-            dihedral_periodicities: vec![],
-            dihedral_phases: vec![],
+            bond_force_constants: Arc::new(vec![]),
+            bond_equil_values: Arc::new(vec![]),
+            angle_force_constants: Arc::new(vec![]),
+            angle_equil_values: Arc::new(vec![]),
+            dihedral_force_constants: Arc::new(vec![]),
+            dihedral_periodicities: Arc::new(vec![]),
+            dihedral_phases: Arc::new(vec![]),
             angles: vec![],
             dihedrals: vec![],
             num_excluded_atoms: vec![],
             excluded_atoms_list: vec![],
             scee_scale_factor: 1.2,
             scnb_scale_factor: 2.0,
-            lj_acoef: vec![],
-            lj_bcoef: vec![],
-            nb_parm_index: vec![],
+            lj_acoef: Arc::new(vec![]),
+            lj_bcoef: Arc::new(vec![]),
+            nb_parm_index: Arc::new(vec![]),
         }
     }
 

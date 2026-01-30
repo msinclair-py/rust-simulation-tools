@@ -2,7 +2,41 @@
 
 use rayon::prelude::*;
 use rst_core::amber::prmtop::AmberTopology;
-use std::collections::HashSet;
+
+/// Flat triangular bitmap for O(1) pair lookups without hashing.
+/// For a pair (i, j) where i < j, the bit index is j*(j-1)/2 + i.
+pub struct PairBitmap {
+    data: Vec<u64>,
+    _n_atoms: usize,
+}
+
+impl PairBitmap {
+    /// Create a new empty bitmap for `n_atoms` atoms.
+    pub fn new(n_atoms: usize) -> Self {
+        let n_bits = n_atoms * (n_atoms - 1) / 2;
+        let n_words = (n_bits + 63) / 64;
+        Self {
+            data: vec![0u64; n_words],
+            _n_atoms: n_atoms,
+        }
+    }
+
+    /// Set the bit for pair (i, j) where i < j.
+    #[inline]
+    pub fn set(&mut self, i: usize, j: usize) {
+        debug_assert!(i < j);
+        let idx = j * (j - 1) / 2 + i;
+        self.data[idx / 64] |= 1u64 << (idx % 64);
+    }
+
+    /// Test whether pair (i, j) is set, where i < j.
+    #[inline]
+    pub fn contains(&self, i: usize, j: usize) -> bool {
+        debug_assert!(i < j);
+        let idx = j * (j - 1) / 2 + i;
+        (self.data[idx / 64] >> (idx % 64)) & 1 != 0
+    }
+}
 
 /// MM energy components in kcal/mol.
 #[derive(Debug, Clone, Default)]
@@ -24,8 +58,8 @@ impl MmEnergy {
 }
 
 /// Build set of excluded atom pairs from topology exclusion lists.
-pub(crate) fn build_exclusion_set(topology: &AmberTopology) -> HashSet<(usize, usize)> {
-    let mut excluded = HashSet::new();
+pub fn build_exclusion_set(topology: &AmberTopology) -> PairBitmap {
+    let mut excluded = PairBitmap::new(topology.n_atoms.max(2));
     let mut offset = 0usize;
     for i in 0..topology.n_atoms {
         let count = if i < topology.num_excluded_atoms.len() {
@@ -38,8 +72,8 @@ pub(crate) fn build_exclusion_set(topology: &AmberTopology) -> HashSet<(usize, u
                 let j = topology.excluded_atoms_list[offset + k];
                 // AMBER uses 0 as placeholder when there are no exclusions
                 if j < topology.n_atoms {
-                    let pair = if i < j { (i, j) } else { (j, i) };
-                    excluded.insert(pair);
+                    let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+                    excluded.set(lo, hi);
                 }
             }
         }
@@ -49,12 +83,12 @@ pub(crate) fn build_exclusion_set(topology: &AmberTopology) -> HashSet<(usize, u
 }
 
 /// Extract 1-4 pairs from dihedrals (those without ignore_14 flag).
-pub(crate) fn build_14_pairs(topology: &AmberTopology) -> HashSet<(usize, usize)> {
-    let mut pairs = HashSet::new();
+pub fn build_14_pairs(topology: &AmberTopology) -> PairBitmap {
+    let mut pairs = PairBitmap::new(topology.n_atoms.max(2));
     for &(i, _j, _k, l, _type_idx, ignore_14) in &topology.dihedrals {
         if !ignore_14 {
-            let pair = if i < l { (i, l) } else { (l, i) };
-            pairs.insert(pair);
+            let (lo, hi) = if i < l { (i, l) } else { (l, i) };
+            pairs.set(lo, hi);
         }
     }
     pairs
@@ -145,8 +179,8 @@ pub fn compute_mm_energy(topology: &AmberTopology, coords: &[[f64; 3]]) -> MmEne
 pub fn compute_mm_energy_with_nb(
     topology: &AmberTopology,
     coords: &[[f64; 3]],
-    excluded: &HashSet<(usize, usize)>,
-    pairs_14: &HashSet<(usize, usize)>,
+    excluded: &PairBitmap,
+    pairs_14: &PairBitmap,
 ) -> MmEnergy {
     let mut energy = MmEnergy::default();
 
@@ -179,7 +213,6 @@ pub fn compute_mm_energy_with_nb(
     // Non-bonded interactions (parallelized over outer atom index)
     let scee = topology.scee_scale_factor;
     let scnb = topology.scnb_scale_factor;
-
     let (nb_vdw, nb_elec, nb_vdw_14, nb_elec_14) = (0..topology.n_atoms)
         .into_par_iter()
         .map(|i| {
@@ -188,12 +221,13 @@ pub fn compute_mm_energy_with_nb(
             let mut vdw_14 = 0.0f64;
             let mut elec_14 = 0.0f64;
             for j in (i + 1)..topology.n_atoms {
-                let pair = (i, j);
+                let dx = coords[i][0] - coords[j][0];
+                let dy = coords[i][1] - coords[j][1];
+                let dz = coords[i][2] - coords[j][2];
+                let r2 = dx * dx + dy * dy + dz * dz;
 
-                if pairs_14.contains(&pair) {
-                    // 1-4 interaction (scaled)
-                    let r = distance(&coords[i], &coords[j]);
-                    let r2 = r * r;
+                if pairs_14.contains(i, j) {
+                    let r = r2.sqrt();
                     let r6 = r2 * r2 * r2;
                     let r12 = r6 * r6;
 
@@ -203,10 +237,8 @@ pub fn compute_mm_energy_with_nb(
                     let qi = topology.charges_amber[i];
                     let qj = topology.charges_amber[j];
                     elec_14 += qi * qj / r / scee;
-                } else if !excluded.contains(&pair) {
-                    // Full non-bonded interaction
-                    let r = distance(&coords[i], &coords[j]);
-                    let r2 = r * r;
+                } else if !excluded.contains(i, j) {
+                    let r = r2.sqrt();
                     let r6 = r2 * r2 * r2;
                     let r12 = r6 * r6;
 
@@ -238,6 +270,8 @@ mod tests {
     use super::*;
     use rst_core::amber::prmtop::AmberTopology;
 
+    use std::sync::Arc;
+
     /// Helper to create a minimal topology for testing.
     fn minimal_topology() -> AmberTopology {
         AmberTopology {
@@ -250,8 +284,8 @@ mod tests {
             charges_amber: vec![],
             residue_labels: vec![],
             residue_pointers: vec![],
-            lj_sigma: vec![],
-            lj_epsilon: vec![],
+            lj_sigma: Arc::new(vec![]),
+            lj_epsilon: Arc::new(vec![]),
             atom_sigmas: vec![],
             atom_epsilons: vec![],
             bonds: vec![],
@@ -259,22 +293,22 @@ mod tests {
             masses: vec![],
             radii: vec![],
             screen: vec![],
-            bond_force_constants: vec![],
-            bond_equil_values: vec![],
-            angle_force_constants: vec![],
-            angle_equil_values: vec![],
-            dihedral_force_constants: vec![],
-            dihedral_periodicities: vec![],
-            dihedral_phases: vec![],
+            bond_force_constants: Arc::new(vec![]),
+            bond_equil_values: Arc::new(vec![]),
+            angle_force_constants: Arc::new(vec![]),
+            angle_equil_values: Arc::new(vec![]),
+            dihedral_force_constants: Arc::new(vec![]),
+            dihedral_periodicities: Arc::new(vec![]),
+            dihedral_phases: Arc::new(vec![]),
             angles: vec![],
             dihedrals: vec![],
             num_excluded_atoms: vec![],
             excluded_atoms_list: vec![],
             scee_scale_factor: 1.2,
             scnb_scale_factor: 2.0,
-            lj_acoef: vec![],
-            lj_bcoef: vec![],
-            nb_parm_index: vec![],
+            lj_acoef: Arc::new(vec![]),
+            lj_bcoef: Arc::new(vec![]),
+            nb_parm_index: Arc::new(vec![]),
         }
     }
 
@@ -284,16 +318,16 @@ mod tests {
         top.n_atoms = 2;
         top.bonds = vec![(0, 1)];
         top.bond_types = vec![0];
-        top.bond_force_constants = vec![300.0]; // kcal/mol/Å²
-        top.bond_equil_values = vec![1.5]; // Å
+        top.bond_force_constants = Arc::new(vec![300.0]); // kcal/mol/Å²
+        top.bond_equil_values = Arc::new(vec![1.5]); // Å
         top.num_excluded_atoms = vec![1, 0];
         top.excluded_atoms_list = vec![1];
         top.atom_type_indices = vec![0, 0];
         top.n_types = 1;
         top.charges_amber = vec![0.0, 0.0];
-        top.nb_parm_index = vec![1];
-        top.lj_acoef = vec![0.0];
-        top.lj_bcoef = vec![0.0];
+        top.nb_parm_index = Arc::new(vec![1]);
+        top.lj_acoef = Arc::new(vec![0.0]);
+        top.lj_bcoef = Arc::new(vec![0.0]);
 
         // Bond at 2.0 Å, equilibrium 1.5 Å → E = 300 * (0.5)^2 = 75 kcal/mol
         let coords = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
@@ -306,16 +340,16 @@ mod tests {
         let mut top = minimal_topology();
         top.n_atoms = 3;
         top.angles = vec![(0, 1, 2, 0)];
-        top.angle_force_constants = vec![50.0]; // kcal/mol/rad²
-        top.angle_equil_values = vec![std::f64::consts::PI]; // 180°
+        top.angle_force_constants = Arc::new(vec![50.0]); // kcal/mol/rad²
+        top.angle_equil_values = Arc::new(vec![std::f64::consts::PI]); // 180°
         top.num_excluded_atoms = vec![2, 1, 0];
         top.excluded_atoms_list = vec![1, 2, 2];
         top.atom_type_indices = vec![0, 0, 0];
         top.n_types = 1;
         top.charges_amber = vec![0.0, 0.0, 0.0];
-        top.nb_parm_index = vec![1];
-        top.lj_acoef = vec![0.0];
-        top.lj_bcoef = vec![0.0];
+        top.nb_parm_index = Arc::new(vec![1]);
+        top.lj_acoef = Arc::new(vec![0.0]);
+        top.lj_bcoef = Arc::new(vec![0.0]);
 
         // 90° angle, eq=180° → delta = PI/2 → E = 50 * (PI/2)^2
         let coords = [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
@@ -334,17 +368,17 @@ mod tests {
         let mut top = minimal_topology();
         top.n_atoms = 4;
         top.dihedrals = vec![(0, 1, 2, 3, 0, false)];
-        top.dihedral_force_constants = vec![2.0]; // kcal/mol
-        top.dihedral_periodicities = vec![2.0];
-        top.dihedral_phases = vec![std::f64::consts::PI]; // gamma = PI
+        top.dihedral_force_constants = Arc::new(vec![2.0]); // kcal/mol
+        top.dihedral_periodicities = Arc::new(vec![2.0]);
+        top.dihedral_phases = Arc::new(vec![std::f64::consts::PI]); // gamma = PI
         top.num_excluded_atoms = vec![3, 2, 1, 0];
         top.excluded_atoms_list = vec![1, 2, 3, 2, 3, 3];
         top.atom_type_indices = vec![0, 0, 0, 0];
         top.n_types = 1;
         top.charges_amber = vec![0.0, 0.0, 0.0, 0.0];
-        top.nb_parm_index = vec![1];
-        top.lj_acoef = vec![0.0];
-        top.lj_bcoef = vec![0.0];
+        top.nb_parm_index = Arc::new(vec![1]);
+        top.lj_acoef = Arc::new(vec![0.0]);
+        top.lj_bcoef = Arc::new(vec![0.0]);
 
         // Trans dihedral (phi=PI): E = (2/2) * [1 + cos(2*PI - PI)] = 1 * [1 + cos(PI)] = 0
         let coords = [

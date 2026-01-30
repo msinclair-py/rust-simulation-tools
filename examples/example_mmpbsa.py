@@ -34,8 +34,8 @@ def example_single_frame():
     """Compute MM, GB, and SA energies for a single structure."""
     print("=== Single-Frame Energy Calculation ===\n")
 
-    topo = read_prmtop("complex.prmtop")
-    coords, _ = read_inpcrd("complex.inpcrd")
+    topo = read_prmtop("data/mmpbsa.prmtop")
+    coords, _ = read_inpcrd("data/mmpbsa.inpcrd")
 
     print(f"System: {topo.n_atoms} atoms, {topo.n_residues} residues")
 
@@ -69,15 +69,15 @@ def example_binding_energy_single_frame():
     """Compute binding free energy for a single snapshot."""
     print("\n=== Single-Frame Binding Energy ===\n")
 
-    topo = read_prmtop("complex.prmtop")
-    coords, _ = read_inpcrd("complex.inpcrd")
+    topo = read_prmtop("data/mmpbsa.prmtop")
+    coords, _ = read_inpcrd("data/mmpbsa.inpcrd")
 
     # Define receptor and ligand by residue index (0-based)
-    receptor_residues = list(range(0, 250))       # e.g. protein residues 0-249
-    ligand_residues = list(range(250, topo.n_residues))  # remaining = ligand
+    receptor_residues = list(range(0, 307))       # e.g. protein residues 0-249
+    ligand_residues = list(range(307, 366))  # remaining = ligand
 
-    print(f"Receptor: residues 0-249 ({len(receptor_residues)} residues)")
-    print(f"Ligand:   residues 250-{topo.n_residues - 1} ({len(ligand_residues)} residues)")
+    print(f"Receptor: residues 0-307 ({len(receptor_residues)} residues)")
+    print(f"Ligand:   residues 307-365 ({len(ligand_residues)} residues)")
 
     frame = compute_binding_energy_single_frame(
         topo, coords,
@@ -98,15 +98,15 @@ def example_trajectory_binding():
     """Compute binding free energy averaged over a trajectory."""
     print("\n=== Trajectory Binding Energy (MM-GBSA) ===\n")
 
-    topo = read_prmtop("complex.prmtop")
+    topo = read_prmtop("data/mmpbsa.prmtop")
 
-    receptor_residues = list(range(0, 250))
-    ligand_residues = list(range(250, topo.n_residues))
+    receptor_residues = list(range(0, 307))
+    ligand_residues = list(range(307, 366))
 
     # Using a DCD trajectory
     result = compute_binding_energy(
         topo,
-        trajectory_path="trajectory.dcd",
+        trajectory_path="data/mmpbsa.dcd",
         receptor_residues=receptor_residues,
         ligand_residues=ligand_residues,
         gb_params=GbParams(model=GbModel.ObcII),
@@ -145,11 +145,11 @@ def example_decomposition():
     """Per-residue energy decomposition."""
     print("\n=== Per-Residue Decomposition ===\n")
 
-    topo = read_prmtop("complex.prmtop")
-    coords, _ = read_inpcrd("complex.inpcrd")
+    topo = read_prmtop("data/mmpbsa.prmtop")
+    coords, _ = read_inpcrd("data/mmpbsa.inpcrd")
 
-    receptor_residues = list(range(0, 250))
-    ligand_residues = list(range(250, topo.n_residues))
+    receptor_residues = list(range(0, 307))
+    ligand_residues = list(range(307, 366))
 
     decomp = decompose_binding_energy(
         topo, coords,
@@ -218,20 +218,20 @@ def example_solvated_binding():
     print("\n=== Solvated Topology Binding Energy ===\n")
 
     # Load the full solvated topology (protein + ligand + water + ions)
-    topo = read_prmtop("solvated.prmtop")
-    coords, _ = read_inpcrd("solvated.inpcrd")
+    topo = read_prmtop("data/mmpbsa.prmtop")
+    coords, _ = read_inpcrd("data/mmpbsa.inpcrd")
 
     print(f"Solvated system: {topo.n_atoms} atoms, {topo.n_residues} residues")
 
     # Specify only the receptor and ligand residues (0-based).
     # Solvent/ion residues are simply omitted — they will be stripped
     # automatically.
-    receptor_residues = list(range(0, 250))   # protein
-    ligand_residues = list(range(250, 251))    # single ligand residue
+    receptor_residues = list(range(0, 307))   # protein
+    ligand_residues = list(range(307, 366))    # single ligand residue
 
     print(f"Receptor: {len(receptor_residues)} residues")
     print(f"Ligand:   {len(ligand_residues)} residues")
-    print(f"(Remaining {topo.n_residues - 251} solvent/ion residues will be stripped automatically)")
+    print(f"(Remaining {topo.n_residues - 366} solvent/ion residues will be stripped automatically)")
 
     # Single-frame binding energy — works identically to the stripped case
     frame = compute_binding_energy_single_frame(
@@ -251,7 +251,7 @@ def example_solvated_binding():
     # Trajectory binding energy also works with solvated topologies
     result = compute_binding_energy(
         topo,
-        trajectory_path="solvated_trajectory.dcd",
+        trajectory_path="data/mmpbsa.dcd",
         receptor_residues=receptor_residues,
         ligand_residues=ligand_residues,
         gb_params=GbParams(model=GbModel.ObcII),

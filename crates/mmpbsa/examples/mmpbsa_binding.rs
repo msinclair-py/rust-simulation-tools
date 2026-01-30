@@ -70,13 +70,7 @@ fn main() {
             salt_concentration: 0.15, // 150 mM NaCl
             ..GbParams::default()
         },
-        // Standard LCPO surface tension parameters
-        sa_params: SaParams {
-            surface_tension: 0.0072, // kcal/(mol·Å²)
-            offset: 0.0,
-            probe_radius: 1.4, // Å
-            n_sphere_points: 960,
-        },
+        sa_params: SaParams::default(),
         trajectory_format: TrajectoryFormat::Mdcrd { has_box: false },
         stride: 1,
         start_frame: 0,

@@ -8,13 +8,12 @@
 
 use crate::gb_energy::{compute_gb_energy, GbParams};
 use crate::mdcrd::MdcrdReader;
-use crate::mm_energy::{build_14_pairs, build_exclusion_set, compute_mm_energy_with_nb};
+use crate::mm_energy::{build_14_pairs, build_exclusion_set, compute_mm_energy_with_nb, PairBitmap};
 use crate::sa_energy::{compute_sa_energy, SaParams};
-use crate::subsystem::{extract_coords, extract_subtopology};
+use crate::subsystem::{extract_coords, extract_coords_into, extract_subtopology};
 use rayon::prelude::*;
 use rst_core::amber::prmtop::AmberTopology;
 use rst_core::trajectory::dcd::DcdReader;
-use std::collections::HashSet;
 use std::path::Path;
 
 /// Energy components for a single subsystem in one frame.
@@ -109,12 +108,12 @@ pub struct BindingConfig {
 /// * `sa_params` - SA parameters
 /// Pre-built non-bonded pair sets for complex, receptor, and ligand topologies.
 struct PrebuiltNbSets {
-    complex_excluded: HashSet<(usize, usize)>,
-    complex_14: HashSet<(usize, usize)>,
-    receptor_excluded: HashSet<(usize, usize)>,
-    receptor_14: HashSet<(usize, usize)>,
-    ligand_excluded: HashSet<(usize, usize)>,
-    ligand_14: HashSet<(usize, usize)>,
+    complex_excluded: PairBitmap,
+    complex_14: PairBitmap,
+    receptor_excluded: PairBitmap,
+    receptor_14: PairBitmap,
+    ligand_excluded: PairBitmap,
+    ligand_14: PairBitmap,
 }
 
 /// Build the effective complex subsystem from receptor + ligand residues.
@@ -220,6 +219,8 @@ fn compute_frame_energy(
     gb_params: &GbParams,
     sa_params: &SaParams,
     nb_sets: &PrebuiltNbSets,
+    receptor_buf: &mut Vec<[f64; 3]>,
+    ligand_buf: &mut Vec<[f64; 3]>,
 ) -> FrameEnergy {
     // Complex energies
     let c_mm = compute_mm_energy_with_nb(
@@ -231,27 +232,29 @@ fn compute_frame_energy(
     let c_gb = compute_gb_energy(complex_top, coords, gb_params);
     let c_sa = compute_sa_energy(complex_top, coords, sa_params);
 
-    // Receptor energies (extract coordinates)
-    let r_coords = extract_coords(coords, receptor_atoms);
+    // Receptor energies (extract coordinates into pre-allocated buffer)
+    extract_coords_into(coords, receptor_atoms, receptor_buf);
+    let r_coords = receptor_buf.as_slice();
     let r_mm = compute_mm_energy_with_nb(
         receptor_top,
-        &r_coords,
+        r_coords,
         &nb_sets.receptor_excluded,
         &nb_sets.receptor_14,
     );
-    let r_gb = compute_gb_energy(receptor_top, &r_coords, gb_params);
-    let r_sa = compute_sa_energy(receptor_top, &r_coords, sa_params);
+    let r_gb = compute_gb_energy(receptor_top, r_coords, gb_params);
+    let r_sa = compute_sa_energy(receptor_top, r_coords, sa_params);
 
     // Ligand energies
-    let l_coords = extract_coords(coords, ligand_atoms);
+    extract_coords_into(coords, ligand_atoms, ligand_buf);
+    let l_coords = ligand_buf.as_slice();
     let l_mm = compute_mm_energy_with_nb(
         ligand_top,
-        &l_coords,
+        l_coords,
         &nb_sets.ligand_excluded,
         &nb_sets.ligand_14,
     );
-    let l_gb = compute_gb_energy(ligand_top, &l_coords, gb_params);
-    let l_sa = compute_sa_energy(ligand_top, &l_coords, sa_params);
+    let l_gb = compute_gb_energy(ligand_top, l_coords, gb_params);
+    let l_sa = compute_sa_energy(ligand_top, l_coords, sa_params);
 
     let complex_e = SubsystemEnergy {
         mm: c_mm.total(),
@@ -297,6 +300,8 @@ fn process_frame(
     sa_params: &SaParams,
     frame_index: usize,
     nb_sets: &PrebuiltNbSets,
+    receptor_buf: &mut Vec<[f64; 3]>,
+    ligand_buf: &mut Vec<[f64; 3]>,
 ) -> FrameEnergy {
     let energy = compute_frame_energy(
         complex_top,
@@ -308,6 +313,8 @@ fn process_frame(
         gb_params,
         sa_params,
         nb_sets,
+        receptor_buf,
+        ligand_buf,
     );
     log::debug!(
         "Frame {}: ΔG = {:.2} (ΔMM={:.2}, ΔGB={:.2}, ΔSA={:.2})",
@@ -370,86 +377,190 @@ pub fn compute_binding_energy(
     let start_frame = config.start_frame;
     let end_frame = config.end_frame;
 
-    // Collect qualifying frame coordinates into memory for parallel processing.
-    // When the topology is solvated, slice each frame to complex atoms only.
-    let mut frame_coords: Vec<Vec<[f64; 3]>> = Vec::new();
+    const BATCH_SIZE: usize = 64;
+    let mut frames: Vec<FrameEnergy> = Vec::new();
+    let mut last_frame_coords: Vec<[f64; 3]> = Vec::new();
+    let mut global_frame_idx: usize = 0;
+
+    // Helper closure to process a batch of frames in parallel
+    let process_batch = |batch: &[Vec<[f64; 3]>],
+                         start_idx: usize,
+                         effective_complex_top: &AmberTopology,
+                         receptor_top: &AmberTopology,
+                         ligand_top: &AmberTopology,
+                         receptor_sel: &rst_core::amber::prmtop::AtomSelection,
+                         ligand_sel: &rst_core::amber::prmtop::AtomSelection,
+                         gb_params: &GbParams,
+                         sa_params: &SaParams,
+                         nb_sets: &PrebuiltNbSets|
+     -> Vec<FrameEnergy> {
+        let n_threads = rayon::current_num_threads();
+        if batch.len() >= n_threads {
+            // Enough frames to saturate cores — parallelize over frames
+            batch
+                .par_iter()
+                .enumerate()
+                .map_init(
+                    || (Vec::new(), Vec::new()),
+                    |(r_buf, l_buf), (idx, coords)| {
+                        process_frame(
+                            effective_complex_top,
+                            receptor_top,
+                            ligand_top,
+                            receptor_sel,
+                            ligand_sel,
+                            coords,
+                            gb_params,
+                            sa_params,
+                            start_idx + idx,
+                            nb_sets,
+                            r_buf,
+                            l_buf,
+                        )
+                    },
+                )
+                .collect()
+        } else {
+            // Few frames — process sequentially to let inner atom-level
+            // parallelism (in MM, GB, SA) fully utilize all cores
+            let mut results = Vec::with_capacity(batch.len());
+            let mut r_buf = Vec::new();
+            let mut l_buf = Vec::new();
+            for (idx, coords) in batch.iter().enumerate() {
+                results.push(process_frame(
+                    effective_complex_top,
+                    receptor_top,
+                    ligand_top,
+                    receptor_sel,
+                    ligand_sel,
+                    coords,
+                    gb_params,
+                    sa_params,
+                    start_idx + idx,
+                    nb_sets,
+                    &mut r_buf,
+                    &mut l_buf,
+                ));
+            }
+            results
+        }
+    };
 
     match &config.trajectory_format {
         TrajectoryFormat::Mdcrd { has_box } => {
             let mut reader = MdcrdReader::open(trajectory_path, complex_top.n_atoms, *has_box)?;
             let mut frame_idx: usize = 0;
+            let mut batch: Vec<Vec<[f64; 3]>> = Vec::with_capacity(BATCH_SIZE);
             while let Some(coords) = reader.read_frame()? {
                 if frame_idx >= end_frame {
                     break;
                 }
                 if frame_idx >= start_frame && (frame_idx - start_frame) % stride == 0 {
                     let coords = slice_frame_to_complex(&coords, &complex_atom_indices);
-                    frame_coords.push(coords);
+                    last_frame_coords = coords.clone();
+                    batch.push(coords);
+
+                    if batch.len() >= BATCH_SIZE {
+                        let batch_results = process_batch(
+                            &batch,
+                            global_frame_idx,
+                            &effective_complex_top,
+                            &receptor_top,
+                            &ligand_top,
+                            &receptor_sel,
+                            &ligand_sel,
+                            &config.gb_params,
+                            &config.sa_params,
+                            &nb_sets,
+                        );
+                        global_frame_idx += batch.len();
+                        frames.extend(batch_results);
+                        batch.clear();
+                    }
                 }
                 frame_idx += 1;
+            }
+            // Process remaining frames
+            if !batch.is_empty() {
+                let batch_results = process_batch(
+                    &batch,
+                    global_frame_idx,
+                    &effective_complex_top,
+                    &receptor_top,
+                    &ligand_top,
+                    &receptor_sel,
+                    &ligand_sel,
+                    &config.gb_params,
+                    &config.sa_params,
+                    &nb_sets,
+                );
+                frames.extend(batch_results);
             }
         }
         TrajectoryFormat::Dcd => {
             let mut reader = DcdReader::open(trajectory_path)?;
             let mut frame_idx: usize = 0;
+            let mut batch: Vec<Vec<[f64; 3]>> = Vec::with_capacity(BATCH_SIZE);
             while let Some((coords_nm, _box_info)) = reader.read_frame()? {
                 if frame_idx >= end_frame {
                     break;
                 }
                 if frame_idx >= start_frame && (frame_idx - start_frame) % stride == 0 {
-                    // DCD reader returns coordinates in nm; convert to Angstroms.
                     let coords: Vec<[f64; 3]> = coords_nm
                         .iter()
                         .map(|c| [c[0] * 10.0, c[1] * 10.0, c[2] * 10.0])
                         .collect();
                     let coords = slice_frame_to_complex(&coords, &complex_atom_indices);
-                    frame_coords.push(coords);
+                    last_frame_coords = coords.clone();
+                    batch.push(coords);
+
+                    if batch.len() >= BATCH_SIZE {
+                        let batch_results = process_batch(
+                            &batch,
+                            global_frame_idx,
+                            &effective_complex_top,
+                            &receptor_top,
+                            &ligand_top,
+                            &receptor_sel,
+                            &ligand_sel,
+                            &config.gb_params,
+                            &config.sa_params,
+                            &nb_sets,
+                        );
+                        global_frame_idx += batch.len();
+                        frames.extend(batch_results);
+                        batch.clear();
+                    }
                 }
                 frame_idx += 1;
+            }
+            // Process remaining frames
+            if !batch.is_empty() {
+                let batch_results = process_batch(
+                    &batch,
+                    global_frame_idx,
+                    &effective_complex_top,
+                    &receptor_top,
+                    &ligand_top,
+                    &receptor_sel,
+                    &ligand_sel,
+                    &config.gb_params,
+                    &config.sa_params,
+                    &nb_sets,
+                );
+                frames.extend(batch_results);
             }
         }
     }
 
-    if frame_coords.is_empty() {
-        return Err("No frames found in trajectory".to_string());
-    }
-
-    if frame_coords.len() > 1000 {
-        log::warn!(
-            "Loading {} frames into memory for parallel processing. \
-             Consider using stride/start_frame/end_frame to reduce memory usage.",
-            frame_coords.len(),
-        );
-    }
-
     log::info!(
-        "Processing {} frames in parallel (start={}, end={}, stride={})",
-        frame_coords.len(),
+        "Processed {} frames in batches of {} (start={}, end={}, stride={})",
+        frames.len(),
+        BATCH_SIZE,
         start_frame,
         end_frame,
         stride,
     );
-
-    let last_frame_coords = frame_coords.last().cloned().unwrap_or_default();
-
-    let frames: Vec<FrameEnergy> = frame_coords
-        .par_iter()
-        .enumerate()
-        .map(|(idx, coords)| {
-            process_frame(
-                &effective_complex_top,
-                &receptor_top,
-                &ligand_top,
-                &receptor_sel,
-                &ligand_sel,
-                coords,
-                &config.gb_params,
-                &config.sa_params,
-                idx,
-                &nb_sets,
-            )
-        })
-        .collect();
 
     if frames.is_empty() {
         return Err("No frames found in trajectory".to_string());
@@ -526,6 +637,8 @@ pub fn compute_binding_energy_single_frame(
         ligand_14: build_14_pairs(&ligand_top),
     };
 
+    let mut r_buf = Vec::new();
+    let mut l_buf = Vec::new();
     Ok(compute_frame_energy(
         &effective_complex_top,
         &receptor_top,
@@ -536,6 +649,8 @@ pub fn compute_binding_energy_single_frame(
         &config.gb_params,
         &config.sa_params,
         &nb_sets,
+        &mut r_buf,
+        &mut l_buf,
     ))
 }
 

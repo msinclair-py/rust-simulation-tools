@@ -5,12 +5,25 @@
 //! pairwise interactions (vdW, electrostatic, GB) with the partner
 //! molecule, plus its share of the SA non-polar term.
 
-use crate::gb_energy::GbParams;
+use crate::gb_energy::{GbEnergy, GbParams};
 use crate::mm_energy::{build_14_pairs, build_exclusion_set, lj_ab};
-use crate::sa_energy::SaParams;
+use crate::sa_energy::{SaEnergy, SaParams};
 use crate::subsystem::{extract_coords, extract_subtopology};
 use rst_core::amber::prmtop::AmberTopology;
 use std::collections::HashMap;
+
+/// Pre-computed GB and SA energy results that can be reused between
+/// `compute_binding_energy` and `decompose_binding_energy` to avoid
+/// redundant computation.
+#[derive(Debug, Clone)]
+pub struct PrecomputedEnergies {
+    pub complex_gb: GbEnergy,
+    pub receptor_gb: GbEnergy,
+    pub ligand_gb: GbEnergy,
+    pub complex_sa: SaEnergy,
+    pub receptor_sa: SaEnergy,
+    pub ligand_sa: SaEnergy,
+}
 
 /// Per-residue energy contributions to binding.
 #[derive(Debug, Clone)]
@@ -67,6 +80,49 @@ pub fn decompose_binding_energy(
     gb_params: &GbParams,
     sa_params: &SaParams,
 ) -> Result<DecompositionResult, String> {
+    decompose_binding_energy_impl(
+        complex_top,
+        coords,
+        receptor_residues,
+        ligand_residues,
+        gb_params,
+        sa_params,
+        None,
+    )
+}
+
+/// Like [`decompose_binding_energy`], but accepts pre-computed GB and SA
+/// energies to skip their recomputation. Use this when you have already
+/// called `compute_binding_energy` and want to reuse those results.
+pub fn decompose_binding_energy_with_precomputed(
+    complex_top: &AmberTopology,
+    coords: &[[f64; 3]],
+    receptor_residues: &[usize],
+    ligand_residues: &[usize],
+    gb_params: &GbParams,
+    sa_params: &SaParams,
+    precomputed: PrecomputedEnergies,
+) -> Result<DecompositionResult, String> {
+    decompose_binding_energy_impl(
+        complex_top,
+        coords,
+        receptor_residues,
+        ligand_residues,
+        gb_params,
+        sa_params,
+        Some(precomputed),
+    )
+}
+
+fn decompose_binding_energy_impl(
+    complex_top: &AmberTopology,
+    coords: &[[f64; 3]],
+    receptor_residues: &[usize],
+    ligand_residues: &[usize],
+    gb_params: &GbParams,
+    sa_params: &SaParams,
+    precomputed: Option<PrecomputedEnergies>,
+) -> Result<DecompositionResult, String> {
     let atom_res = complex_top.atom_residue_indices();
 
     // Build atom sets for receptor and ligand
@@ -89,8 +145,6 @@ pub fn decompose_binding_energy(
     for &ri in &rec_sel.atom_indices {
         for &li in &lig_sel.atom_indices {
             let (i, j) = if ri < li { (ri, li) } else { (li, ri) };
-            let pair = (i, j);
-
             let dx = coords[ri][0] - coords[li][0];
             let dy = coords[ri][1] - coords[li][1];
             let dz = coords[ri][2] - coords[li][2];
@@ -99,7 +153,7 @@ pub fn decompose_binding_energy(
                 continue;
             }
 
-            let (vdw_e, elec_e) = if pairs_14.contains(&pair) {
+            let (vdw_e, elec_e) = if pairs_14.contains(i, j) {
                 let r2 = r * r;
                 let r6 = r2 * r2 * r2;
                 let r12 = r6 * r6;
@@ -109,7 +163,7 @@ pub fn decompose_binding_energy(
                 let qj = complex_top.charges_amber[li];
                 let elec = qi * qj / r / scee;
                 (vdw, elec)
-            } else if !excluded.contains(&pair) {
+            } else if !excluded.contains(i, j) {
                 let r2 = r * r;
                 let r6 = r2 * r2 * r2;
                 let r12 = r6 * r6;
@@ -133,17 +187,28 @@ pub fn decompose_binding_energy(
         }
     }
 
-    // GB decomposition: per-atom ΔGB = GB(complex) - GB(receptor/ligand)
-    // Compute Born radii and GB energy for all three systems
-    let complex_gb = crate::gb_energy::compute_gb_energy(complex_top, coords, gb_params);
-
+    // Extract subtopologies and coordinates for receptor and ligand (needed
+    // for both GB and SA when not using precomputed values, and also used
+    // later for SA per-atom distribution even with precomputed values).
     let rec_sub_top = extract_subtopology(complex_top, &rec_sel.atom_indices);
     let rec_coords = extract_coords(coords, &rec_sel.atom_indices);
-    let rec_gb = crate::gb_energy::compute_gb_energy(&rec_sub_top, &rec_coords, gb_params);
-
     let lig_sub_top = extract_subtopology(complex_top, &lig_sel.atom_indices);
     let lig_coords = extract_coords(coords, &lig_sel.atom_indices);
-    let lig_gb = crate::gb_energy::compute_gb_energy(&lig_sub_top, &lig_coords, gb_params);
+
+    // GB decomposition: per-atom ΔGB = GB(complex) - GB(receptor/ligand)
+    // Compute Born radii and GB energy for all three systems
+    let (complex_gb, rec_gb, lig_gb) = if let Some(ref pre) = precomputed {
+        (
+            pre.complex_gb.clone(),
+            pre.receptor_gb.clone(),
+            pre.ligand_gb.clone(),
+        )
+    } else {
+        let complex_gb = crate::gb_energy::compute_gb_energy(complex_top, coords, gb_params);
+        let rec_gb = crate::gb_energy::compute_gb_energy(&rec_sub_top, &rec_coords, gb_params);
+        let lig_gb = crate::gb_energy::compute_gb_energy(&lig_sub_top, &lig_coords, gb_params);
+        (complex_gb, rec_gb, lig_gb)
+    };
 
     // Per-atom GB contribution: distribute total ΔGB proportionally to
     // the change in each atom's self-energy term (q²/R)
@@ -191,9 +256,14 @@ pub fn decompose_binding_energy(
     }
 
     // SA decomposition: per-atom ΔSASA = SASA(complex) - SASA(isolated)
-    let complex_sa = crate::sa_energy::compute_sa_energy(complex_top, coords, sa_params);
-    let rec_sa = crate::sa_energy::compute_sa_energy(&rec_sub_top, &rec_coords, sa_params);
-    let lig_sa = crate::sa_energy::compute_sa_energy(&lig_sub_top, &lig_coords, sa_params);
+    let (complex_sa, rec_sa, lig_sa) = if let Some(pre) = precomputed {
+        (pre.complex_sa, pre.receptor_sa, pre.ligand_sa)
+    } else {
+        let complex_sa = crate::sa_energy::compute_sa_energy(complex_top, coords, sa_params);
+        let rec_sa = crate::sa_energy::compute_sa_energy(&rec_sub_top, &rec_coords, sa_params);
+        let lig_sa = crate::sa_energy::compute_sa_energy(&lig_sub_top, &lig_coords, sa_params);
+        (complex_sa, rec_sa, lig_sa)
+    };
 
     let mut res_sa: HashMap<usize, f64> = HashMap::new();
     for (local_i, &global_i) in rec_sel.atom_indices.iter().enumerate() {

@@ -123,7 +123,8 @@ pub fn quasi_harmonic_entropy(
     // Build upper triangle of the covariance matrix (symmetric)
     // C_ij = <(x_i - <x_i>)(x_j - <x_j>)>
     // For memory efficiency with large systems, store only the upper triangle.
-    let mut cov = vec![0.0f64; dim * dim];
+    let packed_size = dim * (dim + 1) / 2;
+    let mut cov_packed = vec![0.0f64; packed_size];
     let mut delta = vec![0.0f64; dim];
 
     for frame in trajectories {
@@ -134,22 +135,29 @@ pub fn quasi_harmonic_entropy(
             delta[i * 3 + 2] = coord[2] * sqrt_m - mean[i * 3 + 2];
         }
         for i in 0..dim {
+            let di = delta[i];
             for j in i..dim {
-                cov[i * dim + j] += delta[i] * delta[j];
+                cov_packed[packed_idx(i, j)] += di * delta[j];
             }
         }
     }
 
-    // Normalize and symmetrize
+    // Normalize (no symmetrization needed — only upper triangle stored)
     let nf = n_frames as f64;
+    for v in cov_packed.iter_mut() {
+        *v /= nf;
+    }
+
+    // Unpack to full symmetric matrix for Jacobi eigensolver
+    let mut cov = vec![0.0f64; dim * dim];
     for i in 0..dim {
         for j in i..dim {
-            cov[i * dim + j] /= nf;
-            if i != j {
-                cov[j * dim + i] = cov[i * dim + j];
-            }
+            let val = cov_packed[packed_idx(i, j)];
+            cov[i * dim + j] = val;
+            cov[j * dim + i] = val;
         }
     }
+    drop(cov_packed); // Free packed storage
 
     // Diagonalize using Jacobi eigenvalue algorithm for symmetric matrices
     let eigenvalues = jacobi_eigenvalues(&mut cov, dim);
@@ -209,6 +217,16 @@ pub fn quasi_harmonic_entropy(
         minus_tds,
         method: EntropyMethod::QuasiHarmonic,
     })
+}
+
+/// Index into a packed upper-triangle matrix for element (i, j) where i <= j.
+///
+/// Uses column-major lower-triangle indexing, which is equivalent to
+/// row-major upper-triangle for symmetric matrices. Does not require `dim`.
+#[inline]
+fn packed_idx(i: usize, j: usize) -> usize {
+    debug_assert!(i <= j);
+    j * (j + 1) / 2 + i
 }
 
 /// Jacobi eigenvalue algorithm for a symmetric matrix.

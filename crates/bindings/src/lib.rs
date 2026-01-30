@@ -67,6 +67,14 @@ fn array2_to_coords(arr: &ndarray::ArrayView2<f64>) -> Vec<[f64; 3]> {
         .collect()
 }
 
+/// Convert coordinates from nm (rst_core convention) to Angstroms (AMBER/mmpbsa convention).
+fn coords_nm_to_angstrom(coords: &[[f64; 3]]) -> Vec<[f64; 3]> {
+    coords
+        .iter()
+        .map(|c| [c[0] * 10.0, c[1] * 10.0, c[2] * 10.0])
+        .collect()
+}
+
 // ============================================================================
 // KABSCH ALIGNMENT
 // ============================================================================
@@ -1027,7 +1035,7 @@ struct PyGbParams {
 #[pymethods]
 impl PyGbParams {
     #[new]
-    #[pyo3(signature = (model=None, solute_dielectric=None, solvent_dielectric=None, salt_concentration=None, temperature=None, offset=None, rgbmax=None))]
+    #[pyo3(signature = (model=None, solute_dielectric=None, solvent_dielectric=None, salt_concentration=None, temperature=None, offset=None, rgbmax=None, cutoff=None))]
     fn new(
         model: Option<PyGbModel>,
         solute_dielectric: Option<f64>,
@@ -1036,6 +1044,7 @@ impl PyGbParams {
         temperature: Option<f64>,
         offset: Option<f64>,
         rgbmax: Option<f64>,
+        cutoff: Option<f64>,
     ) -> Self {
         let mut params = GbParams::default();
         if let Some(m) = model {
@@ -1059,6 +1068,9 @@ impl PyGbParams {
         if let Some(v) = rgbmax {
             params.rgbmax = v;
         }
+        if let Some(v) = cutoff {
+            params.cutoff = v;
+        }
         PyGbParams { inner: params }
     }
 
@@ -1077,6 +1089,10 @@ impl PyGbParams {
     #[getter]
     fn temperature(&self) -> f64 {
         self.inner.temperature
+    }
+    #[getter]
+    fn cutoff(&self) -> f64 {
+        self.inner.cutoff
     }
 }
 
@@ -1495,7 +1511,8 @@ fn compute_mm_energy_py(
     topology: &PyAmberTopology,
     coords: PyReadonlyArray2<f64>,
 ) -> PyResult<PyMmEnergy> {
-    let coords_vec = array2_to_coords(&coords.as_array());
+    let coords_nm = array2_to_coords(&coords.as_array());
+    let coords_vec = coords_nm_to_angstrom(&coords_nm);
     let inner = mm_energy::compute_mm_energy(&topology.inner, &coords_vec);
     Ok(PyMmEnergy { inner })
 }
@@ -1507,7 +1524,8 @@ fn compute_gb_energy_py(
     coords: PyReadonlyArray2<f64>,
     gb_params: Option<&PyGbParams>,
 ) -> PyResult<PyGbEnergy> {
-    let coords_vec = array2_to_coords(&coords.as_array());
+    let coords_nm = array2_to_coords(&coords.as_array());
+    let coords_vec = coords_nm_to_angstrom(&coords_nm);
     let params = gb_params.map(|p| p.inner.clone()).unwrap_or_default();
     let inner = gb_energy::compute_gb_energy(&topology.inner, &coords_vec, &params);
     Ok(PyGbEnergy { inner })
@@ -1520,7 +1538,8 @@ fn compute_sa_energy_py(
     coords: PyReadonlyArray2<f64>,
     sa_params: Option<&PySaParams>,
 ) -> PyResult<PySaEnergy> {
-    let coords_vec = array2_to_coords(&coords.as_array());
+    let coords_nm = array2_to_coords(&coords.as_array());
+    let coords_vec = coords_nm_to_angstrom(&coords_nm);
     let params = sa_params.map(|p| p.inner.clone()).unwrap_or_default();
     let inner = sa_energy::compute_sa_energy(&topology.inner, &coords_vec, &params);
     Ok(PySaEnergy { inner })
@@ -1580,7 +1599,8 @@ fn compute_binding_energy_single_frame_py(
     gb_params: Option<&PyGbParams>,
     sa_params: Option<&PySaParams>,
 ) -> PyResult<PyFrameEnergy> {
-    let coords_vec = array2_to_coords(&coords.as_array());
+    let coords_nm = array2_to_coords(&coords.as_array());
+    let coords_vec = coords_nm_to_angstrom(&coords_nm);
     let config = BindingConfig {
         receptor_residues,
         ligand_residues,
@@ -1606,7 +1626,8 @@ fn decompose_binding_energy_py(
     gb_params: Option<&PyGbParams>,
     sa_params: Option<&PySaParams>,
 ) -> PyResult<PyDecompositionResult> {
-    let coords_vec = array2_to_coords(&coords.as_array());
+    let coords_nm = array2_to_coords(&coords.as_array());
+    let coords_vec = coords_nm_to_angstrom(&coords_nm);
     let gb = gb_params.map(|p| p.inner.clone()).unwrap_or_default();
     let sa = sa_params.map(|p| p.inner.clone()).unwrap_or_default();
     let inner = decomposition::decompose_binding_energy(

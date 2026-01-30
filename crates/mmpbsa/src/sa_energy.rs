@@ -16,7 +16,7 @@ pub struct SaParams {
     pub offset: f64,
     /// Solvent probe radius in Å. Default: 1.4.
     pub probe_radius: f64,
-    /// Number of sphere points for SASA calculation. Default: 960.
+    /// Number of sphere points for SASA calculation. Default: 480.
     pub n_sphere_points: usize,
 }
 
@@ -26,7 +26,7 @@ impl Default for SaParams {
             surface_tension: 0.0072,
             offset: 0.0,
             probe_radius: 1.4,
-            n_sphere_points: 960,
+            n_sphere_points: 480,
         }
     }
 }
@@ -81,6 +81,7 @@ mod tests {
     #[test]
     fn test_single_atom_sa() {
         // Single atom: SASA = 4π(r + probe)²
+        use std::sync::Arc;
         let top = AmberTopology {
             n_atoms: 1,
             n_residues: 1,
@@ -91,8 +92,8 @@ mod tests {
             charges_amber: vec![0.0],
             residue_labels: vec!["ALA".to_string()],
             residue_pointers: vec![0],
-            lj_sigma: vec![],
-            lj_epsilon: vec![],
+            lj_sigma: Arc::new(vec![]),
+            lj_epsilon: Arc::new(vec![]),
             atom_sigmas: vec![],
             atom_epsilons: vec![],
             bonds: vec![],
@@ -100,22 +101,22 @@ mod tests {
             masses: vec![12.0],
             radii: vec![1.7],
             screen: vec![0.72],
-            bond_force_constants: vec![],
-            bond_equil_values: vec![],
-            angle_force_constants: vec![],
-            angle_equil_values: vec![],
-            dihedral_force_constants: vec![],
-            dihedral_periodicities: vec![],
-            dihedral_phases: vec![],
+            bond_force_constants: Arc::new(vec![]),
+            bond_equil_values: Arc::new(vec![]),
+            angle_force_constants: Arc::new(vec![]),
+            angle_equil_values: Arc::new(vec![]),
+            dihedral_force_constants: Arc::new(vec![]),
+            dihedral_periodicities: Arc::new(vec![]),
+            dihedral_phases: Arc::new(vec![]),
             angles: vec![],
             dihedrals: vec![],
             num_excluded_atoms: vec![0],
             excluded_atoms_list: vec![],
             scee_scale_factor: 1.2,
             scnb_scale_factor: 2.0,
-            lj_acoef: vec![],
-            lj_bcoef: vec![],
-            nb_parm_index: vec![],
+            lj_acoef: Arc::new(vec![]),
+            lj_bcoef: Arc::new(vec![]),
+            nb_parm_index: Arc::new(vec![]),
         };
 
         let coords = [[0.0, 0.0, 0.0]];

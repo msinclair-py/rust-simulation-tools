@@ -5,6 +5,7 @@
 
 use rst_core::amber::prmtop::AmberTopology;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Extract a sub-topology containing only the specified atom indices.
 ///
@@ -139,8 +140,8 @@ pub fn extract_subtopology(topology: &AmberTopology, atom_indices: &[usize]) -> 
         charges_amber,
         residue_labels: sub_residue_labels,
         residue_pointers: sub_residue_pointers,
-        lj_sigma: topology.lj_sigma.clone(),
-        lj_epsilon: topology.lj_epsilon.clone(),
+        lj_sigma: Arc::clone(&topology.lj_sigma),
+        lj_epsilon: Arc::clone(&topology.lj_epsilon),
         atom_sigmas,
         atom_epsilons,
         bonds: sub_bonds,
@@ -148,28 +149,35 @@ pub fn extract_subtopology(topology: &AmberTopology, atom_indices: &[usize]) -> 
         masses,
         radii,
         screen,
-        bond_force_constants: topology.bond_force_constants.clone(),
-        bond_equil_values: topology.bond_equil_values.clone(),
-        angle_force_constants: topology.angle_force_constants.clone(),
-        angle_equil_values: topology.angle_equil_values.clone(),
-        dihedral_force_constants: topology.dihedral_force_constants.clone(),
-        dihedral_periodicities: topology.dihedral_periodicities.clone(),
-        dihedral_phases: topology.dihedral_phases.clone(),
+        bond_force_constants: Arc::clone(&topology.bond_force_constants),
+        bond_equil_values: Arc::clone(&topology.bond_equil_values),
+        angle_force_constants: Arc::clone(&topology.angle_force_constants),
+        angle_equil_values: Arc::clone(&topology.angle_equil_values),
+        dihedral_force_constants: Arc::clone(&topology.dihedral_force_constants),
+        dihedral_periodicities: Arc::clone(&topology.dihedral_periodicities),
+        dihedral_phases: Arc::clone(&topology.dihedral_phases),
         angles: sub_angles,
         dihedrals: sub_dihedrals,
         num_excluded_atoms: sub_num_excluded,
         excluded_atoms_list: sub_excluded_list,
         scee_scale_factor: topology.scee_scale_factor,
         scnb_scale_factor: topology.scnb_scale_factor,
-        lj_acoef: topology.lj_acoef.clone(),
-        lj_bcoef: topology.lj_bcoef.clone(),
-        nb_parm_index: topology.nb_parm_index.clone(),
+        lj_acoef: Arc::clone(&topology.lj_acoef),
+        lj_bcoef: Arc::clone(&topology.lj_bcoef),
+        nb_parm_index: Arc::clone(&topology.nb_parm_index),
     }
 }
 
 /// Extract coordinates for a subset of atoms.
 pub fn extract_coords(coords: &[[f64; 3]], atom_indices: &[usize]) -> Vec<[f64; 3]> {
     atom_indices.iter().map(|&i| coords[i]).collect()
+}
+
+/// Extract coordinates into an existing buffer, avoiding allocation.
+/// Buffer is resized if necessary but retains capacity between calls.
+pub fn extract_coords_into(coords: &[[f64; 3]], atom_indices: &[usize], buf: &mut Vec<[f64; 3]>) {
+    buf.clear();
+    buf.extend(atom_indices.iter().map(|&i| coords[i]));
 }
 
 #[cfg(test)]

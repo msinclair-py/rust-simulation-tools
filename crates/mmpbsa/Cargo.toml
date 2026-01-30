@@ -8,3 +8,10 @@ rst-core = { path = "../core" }
 rayon = "1.11.0"
 thiserror = "2"
 log = "0.4"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "mmpbsa_bench"
+harness = false
