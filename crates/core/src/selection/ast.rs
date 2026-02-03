@@ -118,6 +118,8 @@ impl CmpOp {
 pub enum RangeField {
     /// 1-based residue ID (AMBER/PDB convention)
     Resid,
+    /// 0-based residue index (MDAnalysis convention)
+    Resindex,
     /// 0-based atom index
     Index,
 }
@@ -126,7 +128,10 @@ pub enum RangeField {
 #[derive(Debug, Clone)]
 pub enum RangeSpec {
     Single(i64),
+    /// Inclusive range [lo, hi] created by dash syntax (e.g., `1-10`)
     Range(i64, i64),
+    /// Half-open range [lo, hi) created by colon/slice syntax (e.g., `0:100`)
+    HalfOpen(i64, i64),
 }
 
 impl RangeSpec {
@@ -134,6 +139,7 @@ impl RangeSpec {
         match self {
             RangeSpec::Single(v) => *v == value,
             RangeSpec::Range(lo, hi) => value >= *lo && value <= *hi,
+            RangeSpec::HalfOpen(lo, hi) => value >= *lo && value < *hi,
         }
     }
 }
@@ -181,5 +187,25 @@ mod tests {
         assert!(!RangeSpec::Single(5).contains(6));
         assert!(RangeSpec::Range(1, 10).contains(5));
         assert!(!RangeSpec::Range(1, 10).contains(11));
+    }
+
+    #[test]
+    fn test_range_spec_inclusive() {
+        // Dash syntax: inclusive [1, 10]
+        let range = RangeSpec::Range(1, 10);
+        assert!(range.contains(1)); // lower bound included
+        assert!(range.contains(10)); // upper bound included
+        assert!(!range.contains(0));
+        assert!(!range.contains(11));
+    }
+
+    #[test]
+    fn test_range_spec_half_open() {
+        // Colon/slice syntax: half-open [0, 100)
+        let range = RangeSpec::HalfOpen(0, 100);
+        assert!(range.contains(0)); // lower bound included
+        assert!(range.contains(99)); // one before upper bound included
+        assert!(!range.contains(100)); // upper bound excluded
+        assert!(!range.contains(-1));
     }
 }

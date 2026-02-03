@@ -308,7 +308,7 @@ mod tests {
                 receptor: Default::default(),
                 ligand: Default::default(),
                 delta_mm: -50.0,
-                delta_gb: 10.0,
+                delta_polar: 10.0,
                 delta_sa: -1.0,
                 delta_total: -41.0,
             })
@@ -333,7 +333,7 @@ mod tests {
                     receptor: Default::default(),
                     ligand: Default::default(),
                     delta_mm: e,
-                    delta_gb: 0.0,
+                    delta_polar: 0.0,
                     delta_sa: 0.0,
                     delta_total: e,
                 }
@@ -356,7 +356,7 @@ mod tests {
             receptor: Default::default(),
             ligand: Default::default(),
             delta_mm: -50.0,
-            delta_gb: 0.0,
+            delta_polar: 0.0,
             delta_sa: 0.0,
             delta_total: -50.0,
         }];

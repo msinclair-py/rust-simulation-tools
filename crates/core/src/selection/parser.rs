@@ -113,7 +113,7 @@ impl Parser {
             Token::Mass | Token::Charge | Token::Radius | Token::Sigma | Token::Epsilon => {
                 self.parse_numeric_kw()
             }
-            Token::Resid | Token::Index => self.parse_range_kw(),
+            Token::Resid | Token::Resindex | Token::Index => self.parse_range_kw(),
             Token::Protein => {
                 self.advance();
                 Ok(Expr::Convenience(ConvenienceKeyword::Protein))
@@ -286,6 +286,7 @@ impl Parser {
     fn parse_range_kw(&mut self) -> Result<Expr, SelectionError> {
         let field = match self.current().token {
             Token::Resid => RangeField::Resid,
+            Token::Resindex => RangeField::Resindex,
             Token::Index => RangeField::Index,
             _ => unreachable!(),
         };
@@ -295,15 +296,20 @@ impl Parser {
     }
 
     // range_arg = INT "-" INT | INT ":" INT | INT ("," INT)* | INT
+    // "-" creates inclusive [lo, hi], ":" creates half-open [lo, hi)
     fn parse_range_arg(&mut self) -> Result<Vec<RangeSpec>, SelectionError> {
         let mut specs = Vec::new();
         let first = self.expect_int()?;
 
         // Check for range delimiter
-        if self.current().token == Token::Dash || self.current().token == Token::Colon {
+        if self.current().token == Token::Dash || self.current().token == Token::To {
             self.advance();
             let second = self.expect_int()?;
-            specs.push(RangeSpec::Range(first, second));
+            specs.push(RangeSpec::Range(first, second)); // Inclusive [lo, hi]
+        } else if self.current().token == Token::Colon {
+            self.advance();
+            let second = self.expect_int()?;
+            specs.push(RangeSpec::HalfOpen(first, second)); // Half-open [lo, hi)
         } else if self.current().token == Token::Comma {
             specs.push(RangeSpec::Single(first));
             while self.current().token == Token::Comma {
@@ -447,6 +453,84 @@ mod tests {
         let expr = parse_selection("resid 1,3,5").unwrap();
         if let Expr::RangeSelect { ranges, .. } = expr {
             assert_eq!(ranges.len(), 3);
+        } else {
+            panic!("Expected RangeSelect");
+        }
+    }
+
+    #[test]
+    fn test_parse_resindex() {
+        let expr = parse_selection("resindex 0").unwrap();
+        assert!(matches!(
+            expr,
+            Expr::RangeSelect {
+                field: RangeField::Resindex,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_resindex_range() {
+        let expr = parse_selection("resindex 0-10").unwrap();
+        if let Expr::RangeSelect { field, ranges } = expr {
+            assert_eq!(field, RangeField::Resindex);
+            assert!(matches!(ranges[0], RangeSpec::Range(0, 10)));
+        } else {
+            panic!("Expected RangeSelect");
+        }
+    }
+
+    #[test]
+    fn test_parse_half_open_colon() {
+        let expr = parse_selection("resindex 0:100").unwrap();
+        if let Expr::RangeSelect { field, ranges } = expr {
+            assert_eq!(field, RangeField::Resindex);
+            assert!(matches!(ranges[0], RangeSpec::HalfOpen(0, 100)));
+        } else {
+            panic!("Expected RangeSelect");
+        }
+    }
+
+    #[test]
+    fn test_parse_resid_half_open() {
+        let expr = parse_selection("resid 1:100").unwrap();
+        if let Expr::RangeSelect { field, ranges } = expr {
+            assert_eq!(field, RangeField::Resid);
+            assert!(matches!(ranges[0], RangeSpec::HalfOpen(1, 100)));
+        } else {
+            panic!("Expected RangeSelect");
+        }
+    }
+
+    #[test]
+    fn test_parse_to_keyword() {
+        // "to" should work the same as dash for inclusive ranges
+        let expr = parse_selection("resid 1 to 100").unwrap();
+        if let Expr::RangeSelect { field, ranges } = expr {
+            assert_eq!(field, RangeField::Resid);
+            assert!(matches!(ranges[0], RangeSpec::Range(1, 100)));
+        } else {
+            panic!("Expected RangeSelect");
+        }
+    }
+
+    #[test]
+    fn test_parse_to_vs_dash_equivalence() {
+        let dash_expr = parse_selection("resindex 0-99").unwrap();
+        let to_expr = parse_selection("resindex 0 to 99").unwrap();
+        if let (
+            Expr::RangeSelect {
+                ranges: dash_ranges,
+                ..
+            },
+            Expr::RangeSelect {
+                ranges: to_ranges, ..
+            },
+        ) = (dash_expr, to_expr)
+        {
+            assert!(matches!(dash_ranges[0], RangeSpec::Range(0, 99)));
+            assert!(matches!(to_ranges[0], RangeSpec::Range(0, 99)));
         } else {
             panic!("Expected RangeSelect");
         }

@@ -36,15 +36,15 @@ pub struct ResidueContribution {
     pub vdw: f64,
     /// Electrostatic interaction with the partner (kcal/mol).
     pub elec: f64,
-    /// GB polar solvation contribution (kcal/mol).
-    pub gb: f64,
+    /// Polar solvation contribution (kcal/mol).
+    pub polar: f64,
     /// SA non-polar solvation contribution (kcal/mol).
     pub sa: f64,
 }
 
 impl ResidueContribution {
     pub fn total(&self) -> f64 {
-        self.vdw + self.elec + self.gb + self.sa
+        self.vdw + self.elec + self.polar + self.sa
     }
 }
 
@@ -285,7 +285,7 @@ fn decompose_binding_energy_impl(
             residue_label: complex_top.residue_labels[r].clone(),
             vdw: *res_vdw.get(&r).unwrap_or(&0.0),
             elec: *res_elec.get(&r).unwrap_or(&0.0),
-            gb: *res_gb.get(&r).unwrap_or(&0.0),
+            polar: *res_gb.get(&r).unwrap_or(&0.0),
             sa: *res_sa.get(&r).unwrap_or(&0.0),
         })
         .collect();
@@ -297,7 +297,7 @@ fn decompose_binding_energy_impl(
             residue_label: complex_top.residue_labels[r].clone(),
             vdw: *res_vdw.get(&r).unwrap_or(&0.0),
             elec: *res_elec.get(&r).unwrap_or(&0.0),
-            gb: *res_gb.get(&r).unwrap_or(&0.0),
+            polar: *res_gb.get(&r).unwrap_or(&0.0),
             sa: *res_sa.get(&r).unwrap_or(&0.0),
         })
         .collect();
@@ -370,7 +370,11 @@ mod tests {
                 "res {} elec not finite",
                 rc.residue_index
             );
-            assert!(rc.gb.is_finite(), "res {} gb not finite", rc.residue_index);
+            assert!(
+                rc.polar.is_finite(),
+                "res {} polar not finite",
+                rc.residue_index
+            );
             assert!(rc.sa.is_finite(), "res {} sa not finite", rc.residue_index);
         }
 
@@ -399,12 +403,12 @@ mod tests {
         println!("Top 5 favorable residues:");
         for rc in all.iter().take(5) {
             println!(
-                "  {:>4} {:>4}: vdW={:>8.2} elec={:>8.2} GB={:>8.2} SA={:>8.2} total={:>8.2}",
+                "  {:>4} {:>4}: vdW={:>8.2} elec={:>8.2} polar={:>8.2} SA={:>8.2} total={:>8.2}",
                 rc.residue_index + 1,
                 rc.residue_label,
                 rc.vdw,
                 rc.elec,
-                rc.gb,
+                rc.polar,
                 rc.sa,
                 rc.total()
             );

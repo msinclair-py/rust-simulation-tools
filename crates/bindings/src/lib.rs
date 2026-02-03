@@ -16,15 +16,17 @@ use rst_core::amber::prmtop::{parse_prmtop, AmberTopology};
 use rst_core::fingerprint::{compute_fingerprints_from_residues, PartnerData, ResidueData};
 use rst_core::kabsch::kabsch_align;
 use rst_core::sasa::{get_vdw_radius, SASAEngine};
+use rst_core::selection::Selection;
 use rst_core::trajectory::dcd::{read_dcd_header, DcdReader};
 use rst_core::wrapping::unwrap_system;
 
-use rst_mmpbsa::binding::{self, BindingConfig, TrajectoryFormat};
+use rst_mmpbsa::binding::{self, BindingConfig, SolvationMethod, TrajectoryFormat};
 use rst_mmpbsa::decomposition;
 use rst_mmpbsa::entropy;
 use rst_mmpbsa::gb_energy::{self, GbModel, GbParams};
 use rst_mmpbsa::mdcrd::MdcrdReader;
 use rst_mmpbsa::mm_energy;
+use rst_mmpbsa::pb_energy::{self, PbParams};
 use rst_mmpbsa::sa_energy::{self, SaParams};
 use rst_mmpbsa::subsystem;
 
@@ -155,6 +157,104 @@ fn unwrap_system_py<'py>(
     } else {
         Ok(result_f64.into())
     }
+}
+
+/// Unwrap a DCD trajectory to remove periodic boundary artifacts.
+///
+/// Reads coordinates and box dimensions directly from the DCD file,
+/// performs unwrapping, and returns the unwrapped trajectory.
+///
+/// # Arguments
+/// * `dcd_path` - Path to the DCD trajectory file
+/// * `start_frame` - First frame to read (0-indexed, default 0)
+/// * `end_frame` - Last frame to read (exclusive, default all frames)
+/// * `stride` - Read every Nth frame (default 1)
+///
+/// # Returns
+/// Tuple of (unwrapped_trajectory, box_dimensions) as numpy arrays
+#[pyfunction]
+#[pyo3(name = "unwrap_dcd", signature = (dcd_path, start_frame=0, end_frame=None, stride=1))]
+fn unwrap_dcd_py<'py>(
+    py: Python<'py>,
+    dcd_path: &str,
+    start_frame: usize,
+    end_frame: Option<usize>,
+    stride: usize,
+) -> PyResult<(Bound<'py, PyArray3<f64>>, Bound<'py, PyArray2<f64>>)> {
+    let mut reader = DcdReader::open(dcd_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to open DCD: {}", e)))?;
+
+    if !reader.header().has_unit_cell {
+        return Err(PyValueError::new_err(
+            "DCD file does not contain unit cell information required for unwrapping",
+        ));
+    }
+
+    let total_frames = reader.n_frames();
+    let actual_end = end_frame.unwrap_or(total_frames).min(total_frames);
+
+    if start_frame >= actual_end {
+        return Err(PyValueError::new_err(format!(
+            "start_frame ({}) must be less than end_frame ({})",
+            start_frame, actual_end
+        )));
+    }
+
+    // Read selected frames
+    let mut trajectory: Vec<Vec<[f64; 3]>> = Vec::new();
+    let mut box_dimensions: Vec<[f64; 3]> = Vec::new();
+
+    for frame_idx in (start_frame..actual_end).step_by(stride) {
+        reader.seek_frame(frame_idx).map_err(|e| {
+            PyIOError::new_err(format!("Failed to seek to frame {}: {}", frame_idx, e))
+        })?;
+
+        match reader.read_frame() {
+            Ok(Some((coords, Some(box_info)))) => {
+                // DCD reader returns coordinates in nm, box_info is [a, b, c, alpha, beta, gamma]
+                // Convert nm to same units and extract box lengths
+                trajectory.push(coords);
+                box_dimensions.push([box_info[0], box_info[1], box_info[2]]);
+            }
+            Ok(Some((_, None))) => {
+                return Err(PyValueError::new_err(format!(
+                    "Frame {} missing unit cell information",
+                    frame_idx
+                )));
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(PyIOError::new_err(format!(
+                    "Failed to read frame {}: {}",
+                    frame_idx, e
+                )));
+            }
+        }
+    }
+
+    if trajectory.is_empty() {
+        return Err(PyValueError::new_err("No frames were read from DCD file"));
+    }
+
+    // Perform unwrapping
+    let unwrapped = unwrap_system(&trajectory, &box_dimensions)
+        .map_err(|e| PyValueError::new_err(format!("Unwrapping failed: {}", e)))?;
+
+    // Convert to numpy arrays
+    let n_frames = unwrapped.len();
+
+    let traj_array = trajectory_to_array3(&unwrapped);
+    let mut box_array = Array2::<f64>::zeros((n_frames, 3));
+    for (i, box_dim) in box_dimensions.iter().enumerate() {
+        box_array[[i, 0]] = box_dim[0];
+        box_array[[i, 1]] = box_dim[1];
+        box_array[[i, 2]] = box_dim[2];
+    }
+
+    Ok((
+        traj_array.to_pyarray_bound(py),
+        box_array.to_pyarray_bound(py),
+    ))
 }
 
 // ============================================================================
@@ -327,6 +427,106 @@ fn calculate_total_sasa(
     Ok(engine.calculate_total_sasa())
 }
 
+/// Calculate SASA using topology for radii and residue mapping.
+///
+/// This is a convenience function that extracts radii and residue indices
+/// from the topology automatically.
+#[pyfunction]
+#[pyo3(name = "compute_sasa_from_topology", signature = (topology, coordinates, probe_radius=1.4, n_sphere_points=960))]
+fn compute_sasa_from_topology_py<'py>(
+    py: Python<'py>,
+    topology: &PyAmberTopology,
+    coordinates: PyReadonlyArray2<'py, f64>,
+    probe_radius: f64,
+    n_sphere_points: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let coords_vec = array2_to_coords(&coordinates.as_array());
+    let residue_indices = topology.inner.atom_residue_indices();
+
+    let engine = SASAEngine::new(
+        &coords_vec,
+        &topology.inner.radii,
+        &residue_indices,
+        probe_radius,
+        n_sphere_points,
+    );
+
+    let per_atom = engine.calculate_per_atom_sasa();
+    let per_residue_map = engine.calculate_per_residue_sasa();
+    let per_residue = hashmap_to_sorted_vec(&per_residue_map);
+    let total: f64 = per_atom.iter().sum();
+
+    let result = PyDict::new_bound(py);
+    result.set_item("per_atom", PyArray1::from_vec_bound(py, per_atom))?;
+    result.set_item("per_residue", PyArray1::from_vec_bound(py, per_residue))?;
+    result.set_item("total", total)?;
+
+    Ok(result)
+}
+
+/// Calculate SASA over a trajectory using topology for radii and residue mapping.
+///
+/// This is a convenience function that extracts radii and residue indices
+/// from the topology automatically.
+#[pyfunction]
+#[pyo3(name = "compute_sasa_trajectory_from_topology", signature = (topology, trajectory, probe_radius=1.4, n_sphere_points=960))]
+fn compute_sasa_trajectory_from_topology_py<'py>(
+    py: Python<'py>,
+    topology: &PyAmberTopology,
+    trajectory: PyReadonlyArray3<'py, f64>,
+    probe_radius: f64,
+    n_sphere_points: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let traj = trajectory.as_array();
+    let n_frames = traj.shape()[0];
+    let n_atoms = traj.shape()[1];
+
+    let residue_indices = topology.inner.atom_residue_indices();
+
+    let mut all_per_atom: Vec<f64> = Vec::with_capacity(n_frames * n_atoms);
+    let mut totals: Vec<f64> = Vec::with_capacity(n_frames);
+    let mut per_residue_list: Vec<Bound<'py, PyDict>> = Vec::with_capacity(n_frames);
+
+    for frame_idx in 0..n_frames {
+        let coords: Vec<[f64; 3]> = (0..n_atoms)
+            .map(|i| {
+                [
+                    traj[[frame_idx, i, 0]],
+                    traj[[frame_idx, i, 1]],
+                    traj[[frame_idx, i, 2]],
+                ]
+            })
+            .collect();
+
+        let engine = SASAEngine::new(
+            &coords,
+            &topology.inner.radii,
+            &residue_indices,
+            probe_radius,
+            n_sphere_points,
+        );
+        let per_atom = engine.calculate_per_atom_sasa();
+        let per_residue_map = engine.calculate_per_residue_sasa();
+
+        let total: f64 = per_atom.iter().sum();
+        totals.push(total);
+        all_per_atom.extend_from_slice(&per_atom);
+
+        let frame_dict = PyDict::new_bound(py);
+        for (&k, &v) in &per_residue_map {
+            frame_dict.set_item(k, v)?;
+        }
+        per_residue_list.push(frame_dict);
+    }
+
+    let result = PyDict::new_bound(py);
+    result.set_item("per_atom", PyArray1::from_vec_bound(py, all_per_atom))?;
+    result.set_item("per_residue", PyList::new_bound(py, &per_residue_list))?;
+    result.set_item("total", PyArray1::from_vec_bound(py, totals))?;
+
+    Ok(result)
+}
+
 #[pyfunction]
 #[pyo3(name = "get_vdw_radius")]
 fn get_vdw_radius_py(element: &str) -> f64 {
@@ -417,6 +617,168 @@ fn compute_fingerprints_py<'py>(
         PyArray1::from_vec_bound(py, vdw),
         PyArray1::from_vec_bound(py, elec),
     ))
+}
+
+// ============================================================================
+// SELECTION
+// ============================================================================
+
+/// A selection of atoms with direct property access.
+///
+/// Selection objects provide MDAnalysis-style access to atom properties,
+/// supporting set operations and aggregate calculations.
+#[pyclass(name = "Selection")]
+#[derive(Clone)]
+pub struct PySelection {
+    inner: Selection,
+}
+
+#[pymethods]
+impl PySelection {
+    /// Atom indices (0-based) as a numpy array.
+    #[getter]
+    fn indices<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        let i64_indices: Vec<i64> = self.inner.indices.iter().map(|&x| x as i64).collect();
+        PyArray1::from_vec_bound(py, i64_indices)
+    }
+
+    /// Atom names for each selected atom.
+    #[getter]
+    fn atom_names<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        PyList::new_bound(py, &self.inner.atom_names)
+    }
+
+    /// Residue name for each selected atom.
+    #[getter]
+    fn residue_names<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        PyList::new_bound(py, &self.inner.residue_names)
+    }
+
+    /// Residue index (0-based) for each selected atom.
+    #[getter]
+    fn residue_indices<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        let i64_indices: Vec<i64> = self
+            .inner
+            .residue_indices
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
+        PyArray1::from_vec_bound(py, i64_indices)
+    }
+
+    /// Atomic masses for each selected atom.
+    #[getter]
+    fn masses<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec_bound(py, self.inner.masses.clone())
+    }
+
+    /// Partial charges for each selected atom.
+    #[getter]
+    fn charges<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec_bound(py, self.inner.charges.clone())
+    }
+
+    /// Born radii for each selected atom.
+    #[getter]
+    fn radii<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec_bound(py, self.inner.radii.clone())
+    }
+
+    /// Positions (coordinates) for each selected atom as (n_atoms, 3) array.
+    /// Returns None if coordinates were not provided during selection.
+    #[getter]
+    fn positions<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.inner.positions().map(|pos| {
+            let n = pos.len();
+            let mut arr = Array2::<f64>::zeros((n, 3));
+            for (i, &[x, y, z]) in pos.iter().enumerate() {
+                arr[[i, 0]] = x;
+                arr[[i, 1]] = y;
+                arr[[i, 2]] = z;
+            }
+            arr.to_pyarray_bound(py)
+        })
+    }
+
+    /// Check if this selection has positions attached.
+    #[getter]
+    fn has_positions(&self) -> bool {
+        self.inner.has_positions()
+    }
+
+    /// Unique residue names in the selection (deduplicated, sorted by residue index).
+    #[getter]
+    fn unique_residue_names<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        let names: Vec<&str> = self.inner.unique_residue_names();
+        PyList::new_bound(py, names)
+    }
+
+    /// Unique residue indices (0-based) in the selection (sorted).
+    #[getter]
+    fn unique_residue_indices<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        let indices: Vec<i64> = self
+            .inner
+            .unique_residue_indices()
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
+        PyArray1::from_vec_bound(py, indices)
+    }
+
+    /// Number of atoms in the selection.
+    #[getter]
+    fn n_atoms(&self) -> usize {
+        self.inner.n_atoms
+    }
+
+    /// Number of unique residues in the selection.
+    #[getter]
+    fn n_residues(&self) -> usize {
+        self.inner.n_residues
+    }
+
+    /// Calculate the total mass of all atoms in the selection.
+    fn total_mass(&self) -> f64 {
+        self.inner.total_mass()
+    }
+
+    /// Calculate the total charge of all atoms in the selection.
+    fn total_charge(&self) -> f64 {
+        self.inner.total_charge()
+    }
+
+    /// Union of two selections (atoms in either selection).
+    fn __or__(&self, other: &PySelection) -> PySelection {
+        PySelection {
+            inner: self.inner.union(&other.inner),
+        }
+    }
+
+    /// Intersection of two selections (atoms in both selections).
+    fn __and__(&self, other: &PySelection) -> PySelection {
+        PySelection {
+            inner: self.inner.intersection(&other.inner),
+        }
+    }
+
+    /// Difference of two selections (atoms in self but not in other).
+    fn __sub__(&self, other: &PySelection) -> PySelection {
+        PySelection {
+            inner: self.inner.difference(&other.inner),
+        }
+    }
+
+    /// Number of atoms in the selection.
+    fn __len__(&self) -> usize {
+        self.inner.n_atoms
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<Selection: {} atoms, {} residues>",
+            self.inner.n_atoms, self.inner.n_residues
+        )
+    }
 }
 
 // ============================================================================
@@ -544,6 +906,47 @@ impl PyAmberTopology {
             None => rst_core::selection::select(&self.inner, expression)
                 .map_err(|e| PyValueError::new_err(e.to_string())),
         }
+    }
+
+    /// Select atoms and return a Selection object with direct property access.
+    ///
+    /// This is the object-oriented alternative to `select_atoms()` that provides
+    /// direct access to atom properties like names, masses, and charges.
+    ///
+    /// # Arguments
+    /// * `expression` - VMD-style selection expression (e.g., "protein and name CA")
+    /// * `coordinates` - Optional atom coordinates for spatial queries (required for `within`)
+    ///
+    /// # Returns
+    /// A `Selection` object containing the selected atoms with their properties
+    ///
+    /// # Example
+    /// ```python
+    /// sel = topo.select("protein and name CA")
+    /// print(f"Selected {sel.n_atoms} atoms from {sel.n_residues} residues")
+    /// print(f"Total mass: {sel.total_mass():.2f}")
+    /// print(f"Unique residues: {sel.unique_residue_names}")
+    /// ```
+    #[pyo3(signature = (expression, coordinates=None))]
+    fn select(
+        &self,
+        expression: &str,
+        coordinates: Option<PyReadonlyArray2<'_, f64>>,
+    ) -> PyResult<PySelection> {
+        let selection = match coordinates {
+            Some(coords) => {
+                let coords_vec = array2_to_coords(&coords.as_array());
+                rst_core::selection::select_full_with_coordinates(
+                    &self.inner,
+                    expression,
+                    &coords_vec,
+                )
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+            }
+            None => rst_core::selection::select_full(&self.inner, expression)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+        };
+        Ok(PySelection { inner: selection })
     }
 
     fn bonds(&self) -> Vec<(usize, usize)> {
@@ -1002,6 +1405,40 @@ impl PyFingerprintSession {
     fn fingerprint_mode(&self) -> PyFingerprintMode {
         self.fingerprint_mode
     }
+
+    /// Get the binder residue indices (0-based).
+    #[getter]
+    fn binder_residue_indices<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        PyList::new_bound(py, &self.binder_residues)
+    }
+
+    /// Get the target residue indices (0-based).
+    #[getter]
+    fn target_residue_indices<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        PyList::new_bound(py, &self.target_residues)
+    }
+
+    /// Get the binder residue labels directly (independent of fingerprint_mode).
+    #[getter]
+    fn binder_residue_labels<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        let labels: Vec<&str> = self
+            .binder_residues
+            .iter()
+            .filter_map(|&i| self.topology.residue_labels.get(i).map(|s| s.as_str()))
+            .collect();
+        PyList::new_bound(py, &labels)
+    }
+
+    /// Get the target residue labels directly (independent of fingerprint_mode).
+    #[getter]
+    fn target_residue_labels<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        let labels: Vec<&str> = self
+            .target_residues
+            .iter()
+            .filter_map(|&i| self.topology.residue_labels.get(i).map(|s| s.as_str()))
+            .collect();
+        PyList::new_bound(py, &labels)
+    }
 }
 
 // ============================================================================
@@ -1093,6 +1530,84 @@ impl PyGbParams {
     #[getter]
     fn cutoff(&self) -> f64 {
         self.inner.cutoff
+    }
+}
+
+#[pyclass(name = "PbParams")]
+#[derive(Clone)]
+struct PyPbParams {
+    inner: PbParams,
+}
+
+#[pymethods]
+impl PyPbParams {
+    #[new]
+    #[pyo3(signature = (grid_spacing=None, grid_buffer=None, solute_dielectric=None, solvent_dielectric=None, salt_concentration=None, temperature=None, probe_radius=None, ion_radius=None, tolerance=None, max_iterations=None))]
+    fn new(
+        grid_spacing: Option<f64>,
+        grid_buffer: Option<f64>,
+        solute_dielectric: Option<f64>,
+        solvent_dielectric: Option<f64>,
+        salt_concentration: Option<f64>,
+        temperature: Option<f64>,
+        probe_radius: Option<f64>,
+        ion_radius: Option<f64>,
+        tolerance: Option<f64>,
+        max_iterations: Option<usize>,
+    ) -> Self {
+        let mut params = PbParams::default();
+        if let Some(v) = grid_spacing {
+            params.grid_spacing = v;
+        }
+        if let Some(v) = grid_buffer {
+            params.grid_buffer = v;
+        }
+        if let Some(v) = solute_dielectric {
+            params.solute_dielectric = v;
+        }
+        if let Some(v) = solvent_dielectric {
+            params.solvent_dielectric = v;
+        }
+        if let Some(v) = salt_concentration {
+            params.salt_concentration = v;
+        }
+        if let Some(v) = temperature {
+            params.temperature = v;
+        }
+        if let Some(v) = probe_radius {
+            params.probe_radius = v;
+        }
+        if let Some(v) = ion_radius {
+            params.ion_radius = v;
+        }
+        if let Some(v) = tolerance {
+            params.tolerance = v;
+        }
+        if let Some(v) = max_iterations {
+            params.max_iterations = v;
+        }
+        PyPbParams { inner: params }
+    }
+
+    #[getter]
+    fn grid_spacing(&self) -> f64 {
+        self.inner.grid_spacing
+    }
+    #[getter]
+    fn solute_dielectric(&self) -> f64 {
+        self.inner.solute_dielectric
+    }
+    #[getter]
+    fn solvent_dielectric(&self) -> f64 {
+        self.inner.solvent_dielectric
+    }
+    #[getter]
+    fn salt_concentration(&self) -> f64 {
+        self.inner.salt_concentration
+    }
+    #[getter]
+    fn temperature(&self) -> f64 {
+        self.inner.temperature
     }
 }
 
@@ -1241,8 +1756,13 @@ impl PyFrameEnergy {
         self.inner.delta_mm
     }
     #[getter]
+    fn delta_polar(&self) -> f64 {
+        self.inner.delta_polar
+    }
+    /// Backward-compatible alias.
+    #[getter]
     fn delta_gb(&self) -> f64 {
-        self.inner.delta_gb
+        self.inner.delta_polar
     }
     #[getter]
     fn delta_sa(&self) -> f64 {
@@ -1258,8 +1778,12 @@ impl PyFrameEnergy {
         self.inner.complex.mm
     }
     #[getter]
+    fn complex_polar(&self) -> f64 {
+        self.inner.complex.polar
+    }
+    #[getter]
     fn complex_gb(&self) -> f64 {
-        self.inner.complex.gb
+        self.inner.complex.polar
     }
     #[getter]
     fn complex_sa(&self) -> f64 {
@@ -1275,8 +1799,12 @@ impl PyFrameEnergy {
         self.inner.receptor.mm
     }
     #[getter]
+    fn receptor_polar(&self) -> f64 {
+        self.inner.receptor.polar
+    }
+    #[getter]
     fn receptor_gb(&self) -> f64 {
-        self.inner.receptor.gb
+        self.inner.receptor.polar
     }
     #[getter]
     fn receptor_sa(&self) -> f64 {
@@ -1292,8 +1820,12 @@ impl PyFrameEnergy {
         self.inner.ligand.mm
     }
     #[getter]
+    fn ligand_polar(&self) -> f64 {
+        self.inner.ligand.polar
+    }
+    #[getter]
     fn ligand_gb(&self) -> f64 {
-        self.inner.ligand.gb
+        self.inner.ligand.polar
     }
     #[getter]
     fn ligand_sa(&self) -> f64 {
@@ -1317,8 +1849,12 @@ impl PyBindingResult {
         self.inner.mean_delta_mm
     }
     #[getter]
+    fn mean_delta_polar(&self) -> f64 {
+        self.inner.mean_delta_polar
+    }
+    #[getter]
     fn mean_delta_gb(&self) -> f64 {
-        self.inner.mean_delta_gb
+        self.inner.mean_delta_polar
     }
     #[getter]
     fn mean_delta_sa(&self) -> f64 {
@@ -1337,8 +1873,12 @@ impl PyBindingResult {
         self.inner.std_delta_mm
     }
     #[getter]
+    fn std_delta_polar(&self) -> f64 {
+        self.inner.std_delta_polar
+    }
+    #[getter]
     fn std_delta_gb(&self) -> f64 {
-        self.inner.std_delta_gb
+        self.inner.std_delta_polar
     }
     #[getter]
     fn std_delta_sa(&self) -> f64 {
@@ -1394,8 +1934,12 @@ impl PyResidueContribution {
         self.inner.elec
     }
     #[getter]
+    fn polar(&self) -> f64 {
+        self.inner.polar
+    }
+    #[getter]
     fn gb(&self) -> f64 {
-        self.inner.gb
+        self.inner.polar
     }
     #[getter]
     fn sa(&self) -> f64 {
@@ -1545,14 +2089,27 @@ fn compute_sa_energy_py(
     Ok(PySaEnergy { inner })
 }
 
+/// Build a SolvationMethod from optional Python params.
+fn build_solvation_method(
+    gb_params: Option<&PyGbParams>,
+    pb_params: Option<&PyPbParams>,
+) -> SolvationMethod {
+    if let Some(pb) = pb_params {
+        SolvationMethod::PB(pb.inner.clone())
+    } else {
+        SolvationMethod::GB(gb_params.map(|p| p.inner.clone()).unwrap_or_default())
+    }
+}
+
 #[pyfunction]
-#[pyo3(name = "compute_binding_energy", signature = (topology, trajectory_path, receptor_residues, ligand_residues, gb_params=None, sa_params=None, trajectory_format=None, has_box=false, stride=1, start_frame=0, end_frame=usize::MAX))]
+#[pyo3(name = "compute_binding_energy", signature = (topology, trajectory_path, receptor_residues, ligand_residues, gb_params=None, pb_params=None, sa_params=None, trajectory_format=None, has_box=false, stride=1, start_frame=0, end_frame=usize::MAX))]
 fn compute_binding_energy_py(
     topology: &Bound<'_, PyAny>,
     trajectory_path: &str,
     receptor_residues: Vec<usize>,
     ligand_residues: Vec<usize>,
     gb_params: Option<&PyGbParams>,
+    pb_params: Option<&PyPbParams>,
     sa_params: Option<&PySaParams>,
     trajectory_format: Option<&str>,
     has_box: bool,
@@ -1576,7 +2133,7 @@ fn compute_binding_energy_py(
     let config = BindingConfig {
         receptor_residues,
         ligand_residues,
-        gb_params: gb_params.map(|p| p.inner.clone()).unwrap_or_default(),
+        solvation_method: build_solvation_method(gb_params, pb_params),
         sa_params: sa_params.map(|p| p.inner.clone()).unwrap_or_default(),
         trajectory_format: fmt,
         stride,
@@ -1590,13 +2147,14 @@ fn compute_binding_energy_py(
 }
 
 #[pyfunction]
-#[pyo3(name = "compute_binding_energy_single_frame", signature = (topology, coords, receptor_residues, ligand_residues, gb_params=None, sa_params=None))]
+#[pyo3(name = "compute_binding_energy_single_frame", signature = (topology, coords, receptor_residues, ligand_residues, gb_params=None, pb_params=None, sa_params=None))]
 fn compute_binding_energy_single_frame_py(
     topology: &PyAmberTopology,
     coords: PyReadonlyArray2<f64>,
     receptor_residues: Vec<usize>,
     ligand_residues: Vec<usize>,
     gb_params: Option<&PyGbParams>,
+    pb_params: Option<&PyPbParams>,
     sa_params: Option<&PySaParams>,
 ) -> PyResult<PyFrameEnergy> {
     let coords_nm = array2_to_coords(&coords.as_array());
@@ -1604,7 +2162,7 @@ fn compute_binding_energy_single_frame_py(
     let config = BindingConfig {
         receptor_residues,
         ligand_residues,
-        gb_params: gb_params.map(|p| p.inner.clone()).unwrap_or_default(),
+        solvation_method: build_solvation_method(gb_params, pb_params),
         sa_params: sa_params.map(|p| p.inner.clone()).unwrap_or_default(),
         trajectory_format: TrajectoryFormat::Mdcrd { has_box: false },
         stride: 1,
@@ -1665,6 +2223,40 @@ fn quasi_harmonic_entropy_py(
         .map(|inner| PyEntropyEstimate { inner })
 }
 
+#[pyclass(name = "PbEnergy")]
+struct PyPbEnergy {
+    inner: pb_energy::PbEnergy,
+}
+
+#[pymethods]
+impl PyPbEnergy {
+    #[getter]
+    fn total(&self) -> f64 {
+        self.inner.total
+    }
+}
+
+#[pyfunction]
+#[pyo3(name = "compute_pb_energy", signature = (topology, coords, pb_params=None, solute_residues=None))]
+fn compute_pb_energy_py(
+    topology: &PyAmberTopology,
+    coords: PyReadonlyArray2<f64>,
+    pb_params: Option<&PyPbParams>,
+    solute_residues: Option<Vec<usize>>,
+) -> PyResult<PyPbEnergy> {
+    let coords_nm = array2_to_coords(&coords.as_array());
+    let coords_vec = coords_nm_to_angstrom(&coords_nm);
+    let params = pb_params.map(|p| p.inner.clone()).unwrap_or_default();
+    let inner = pb_energy::compute_pb_energy_solvated(
+        &topology.inner,
+        &coords_vec,
+        &params,
+        solute_residues.as_deref(),
+    )
+    .map_err(|e| PyValueError::new_err(e))?;
+    Ok(PyPbEnergy { inner })
+}
+
 #[pyfunction]
 #[pyo3(name = "extract_subtopology")]
 fn extract_subtopology_py(topology: &PyAmberTopology, atom_indices: Vec<usize>) -> PyAmberTopology {
@@ -1683,12 +2275,18 @@ fn rust_simulation_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Wrapping
     m.add_function(wrap_pyfunction!(unwrap_system_py, m)?)?;
+    m.add_function(wrap_pyfunction!(unwrap_dcd_py, m)?)?;
 
     // SASA
     m.add_function(wrap_pyfunction!(calculate_sasa, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_sasa_trajectory, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_residue_sasa, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_total_sasa, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_sasa_from_topology_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        compute_sasa_trajectory_from_topology_py,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(get_vdw_radius_py, m)?)?;
     m.add_function(wrap_pyfunction!(get_radii_array, m)?)?;
 
@@ -1697,6 +2295,7 @@ fn rust_simulation_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // AMBER
     m.add_class::<PyAmberTopology>()?;
+    m.add_class::<PySelection>()?;
     m.add_function(wrap_pyfunction!(read_prmtop_py, m)?)?;
     m.add_function(wrap_pyfunction!(read_inpcrd_py, m)?)?;
 
@@ -1711,7 +2310,9 @@ fn rust_simulation_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // MM-PBSA
     m.add_class::<PyGbModel>()?;
     m.add_class::<PyGbParams>()?;
+    m.add_class::<PyPbParams>()?;
     m.add_class::<PySaParams>()?;
+    m.add_class::<PyPbEnergy>()?;
     m.add_class::<PyMmEnergy>()?;
     m.add_class::<PyGbEnergy>()?;
     m.add_class::<PySaEnergy>()?;
@@ -1724,6 +2325,7 @@ fn rust_simulation_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compute_mm_energy_py, m)?)?;
     m.add_function(wrap_pyfunction!(compute_gb_energy_py, m)?)?;
     m.add_function(wrap_pyfunction!(compute_sa_energy_py, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_pb_energy_py, m)?)?;
     m.add_function(wrap_pyfunction!(compute_binding_energy_py, m)?)?;
     m.add_function(wrap_pyfunction!(compute_binding_energy_single_frame_py, m)?)?;
     m.add_function(wrap_pyfunction!(decompose_binding_energy_py, m)?)?;

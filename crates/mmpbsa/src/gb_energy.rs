@@ -123,7 +123,7 @@ impl GbCache {
 ///
 /// Uses the relation κ = sqrt(8π·l_B·N_A·c·10⁻²⁷) where l_B is the
 /// Bjerrum length in Å at the given temperature.
-fn compute_kappa(salt_conc: f64, solvent_dielectric: f64, temperature: f64) -> f64 {
+pub(crate) fn compute_kappa(salt_conc: f64, solvent_dielectric: f64, temperature: f64) -> f64 {
     if salt_conc <= 0.0 {
         return 0.0;
     }

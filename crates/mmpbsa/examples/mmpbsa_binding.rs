@@ -15,7 +15,9 @@
 //! ```
 
 use rst_core::amber::prmtop::parse_prmtop;
-use rst_mmpbsa::binding::{compute_binding_energy, BindingConfig, BindingResult, TrajectoryFormat};
+use rst_mmpbsa::binding::{
+    compute_binding_energy, BindingConfig, BindingResult, SolvationMethod, TrajectoryFormat,
+};
 use rst_mmpbsa::decomposition::decompose_binding_energy;
 use rst_mmpbsa::entropy::interaction_entropy;
 use rst_mmpbsa::gb_energy::{GbModel, GbParams};
@@ -63,13 +65,13 @@ fn main() {
         receptor_residues: receptor_residues.clone(),
         ligand_residues: ligand_residues.clone(),
         // OBC-II (igb=5) is generally the most accurate GB model
-        gb_params: GbParams {
+        solvation_method: SolvationMethod::GB(GbParams {
             model: GbModel::ObcII,
             solute_dielectric: 1.0,
             solvent_dielectric: 80.0,
             salt_concentration: 0.15, // 150 mM NaCl
             ..GbParams::default()
-        },
+        }),
         sa_params: SaParams::default(),
         trajectory_format: TrajectoryFormat::Mdcrd { has_box: false },
         stride: 1,
@@ -100,8 +102,8 @@ fn main() {
     );
     println!(
         "{:<20} {:>12} kcal/mol",
-        "ΔG(GB)",
-        format!("{:.2}", result.mean_delta_gb)
+        "ΔG(Polar)",
+        format!("{:.2}", result.mean_delta_polar)
     );
     println!(
         "{:<20} {:>12} kcal/mol",
@@ -146,12 +148,16 @@ fn main() {
 
     let last_frame_coords = &result.last_frame_coords;
 
+    let gb_params_for_decomp = match &config.solvation_method {
+        SolvationMethod::GB(p) => p.clone(),
+        SolvationMethod::PB(_) => GbParams::default(),
+    };
     let decomp = decompose_binding_energy(
         &topology,
         &last_frame_coords,
         &receptor_residues,
         &ligand_residues,
-        &config.gb_params,
+        &gb_params_for_decomp,
         &config.sa_params,
     )
     .expect("Decomposition failed");
@@ -162,7 +168,7 @@ fn main() {
 
     println!(
         "\n{:<6} {:<8} {:>8} {:>8} {:>8} {:>8} {:>10}",
-        "ResID", "Name", "vdW", "Elec", "GB", "SA", "Total"
+        "ResID", "Name", "vdW", "Elec", "Polar", "SA", "Total"
     );
     println!("{}", "-".repeat(60));
 
@@ -173,7 +179,7 @@ fn main() {
             contrib.residue_label,
             contrib.vdw,
             contrib.elec,
-            contrib.gb,
+            contrib.polar,
             contrib.sa,
             contrib.total(),
         );
@@ -186,7 +192,7 @@ fn main() {
     println!("\nTop ligand residues:");
     println!(
         "{:<6} {:<8} {:>8} {:>8} {:>8} {:>8} {:>10}",
-        "ResID", "Name", "vdW", "Elec", "GB", "SA", "Total"
+        "ResID", "Name", "vdW", "Elec", "Polar", "SA", "Total"
     );
     println!("{}", "-".repeat(60));
 
@@ -197,7 +203,7 @@ fn main() {
             contrib.residue_label,
             contrib.vdw,
             contrib.elec,
-            contrib.gb,
+            contrib.polar,
             contrib.sa,
             contrib.total(),
         );
@@ -211,7 +217,7 @@ fn main() {
     println!("{}", "=".repeat(60));
     println!(
         "{:<8} {:>10} {:>10} {:>10} {:>10}",
-        "Frame", "ΔMM", "ΔGB", "ΔSA", "ΔTotal"
+        "Frame", "ΔMM", "ΔPolar", "ΔSA", "ΔTotal"
     );
     println!("{}", "-".repeat(60));
 
@@ -220,7 +226,7 @@ fn main() {
             "{:<8} {:>10.2} {:>10.2} {:>10.2} {:>10.2}",
             i + 1,
             frame.delta_mm,
-            frame.delta_gb,
+            frame.delta_polar,
             frame.delta_sa,
             frame.delta_total,
         );

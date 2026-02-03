@@ -7,9 +7,10 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rst_core::amber::prmtop::AmberTopology;
-use rst_mmpbsa::binding::{BindingConfig, TrajectoryFormat};
+use rst_mmpbsa::binding::{BindingConfig, SolvationMethod, TrajectoryFormat};
 use rst_mmpbsa::gb_energy::{GbModel, GbParams};
 use rst_mmpbsa::mm_energy::{compute_mm_energy, compute_mm_energy_with_nb, PairBitmap};
+use rst_mmpbsa::pb_energy::{compute_pb_energy, PbParams};
 use rst_mmpbsa::sa_energy::{compute_sa_energy, SaParams};
 use std::f64::consts::PI;
 use std::sync::Arc;
@@ -303,7 +304,7 @@ fn bench_binding_single_frame(c: &mut Criterion) {
         let config = BindingConfig {
             receptor_residues: (0..n_receptor_res).collect(),
             ligand_residues: (n_receptor_res..total_res).collect(),
-            gb_params: GbParams::default(),
+            solvation_method: SolvationMethod::GB(GbParams::default()),
             sa_params: SaParams::default(),
             trajectory_format: TrajectoryFormat::Mdcrd { has_box: false },
             stride: 1,
@@ -338,22 +339,89 @@ fn bench_nb_set_construction(c: &mut Criterion) {
         let top = build_synthetic_topology(n_res, atoms_per_res);
         let label = format!("{}atoms", top.n_atoms);
 
-        group.bench_with_input(
-            BenchmarkId::new("exclusion_set", &label),
-            &top,
-            |b, top| {
-                b.iter(|| rst_mmpbsa::mm_energy::build_exclusion_set(black_box(top)));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("exclusion_set", &label), &top, |b, top| {
+            b.iter(|| rst_mmpbsa::mm_energy::build_exclusion_set(black_box(top)));
+        });
+
+        group.bench_with_input(BenchmarkId::new("14_pairs", &label), &top, |b, top| {
+            b.iter(|| rst_mmpbsa::mm_energy::build_14_pairs(black_box(top)));
+        });
+    }
+    group.finish();
+}
+
+fn bench_pb_energy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pb_energy");
+    // PB is expensive — use small systems and limit sample size
+    group.sample_size(10);
+
+    for &(n_res, atoms_per_res) in &[(5, 5), (10, 10)] {
+        let top = build_synthetic_topology(n_res, atoms_per_res);
+        let coords = build_synthetic_coords(top.n_atoms);
+        let label = format!("{}atoms", top.n_atoms);
+
+        let params = PbParams {
+            grid_spacing: 0.5,
+            grid_buffer: 10.0,
+            tolerance: 1e-6,
+            max_iterations: 10000,
+            ..PbParams::default()
+        };
 
         group.bench_with_input(
-            BenchmarkId::new("14_pairs", &label),
-            &top,
-            |b, top| {
-                b.iter(|| rst_mmpbsa::mm_energy::build_14_pairs(black_box(top)));
+            BenchmarkId::new("multigrid", &label),
+            &(&top, &coords, &params),
+            |b, &(top, coords, params)| {
+                b.iter(|| compute_pb_energy(black_box(top), black_box(coords), params));
             },
         );
     }
+    group.finish();
+}
+
+fn bench_binding_single_frame_pb(c: &mut Criterion) {
+    let mut group = c.benchmark_group("binding_single_frame_pb");
+    group.sample_size(10);
+
+    let n_receptor_res = 10;
+    let n_ligand_res = 5;
+    let atoms_per_res = 5;
+    let total_res = n_receptor_res + n_ligand_res;
+    let top = build_synthetic_topology(total_res, atoms_per_res);
+    let coords = build_synthetic_coords(top.n_atoms);
+    let label = format!("{}atoms_{}r_{}l", top.n_atoms, n_receptor_res, n_ligand_res);
+
+    let config = BindingConfig {
+        receptor_residues: (0..n_receptor_res).collect(),
+        ligand_residues: (n_receptor_res..total_res).collect(),
+        solvation_method: SolvationMethod::PB(PbParams {
+            grid_spacing: 0.5,
+            grid_buffer: 10.0,
+            tolerance: 1e-6,
+            max_iterations: 10000,
+            ..PbParams::default()
+        }),
+        sa_params: SaParams::default(),
+        trajectory_format: TrajectoryFormat::Mdcrd { has_box: false },
+        stride: 1,
+        start_frame: 0,
+        end_frame: usize::MAX,
+    };
+
+    group.bench_with_input(
+        BenchmarkId::new("full_pipeline", &label),
+        &(&top, &coords, &config),
+        |b, &(top, coords, config)| {
+            b.iter(|| {
+                rst_mmpbsa::binding::compute_binding_energy_single_frame(
+                    black_box(top),
+                    black_box(coords),
+                    config,
+                )
+                .unwrap()
+            });
+        },
+    );
     group.finish();
 }
 
@@ -364,5 +432,7 @@ criterion_group!(
     bench_sa_energy,
     bench_binding_single_frame,
     bench_nb_set_construction,
+    bench_pb_energy,
+    bench_binding_single_frame_pb,
 );
 criterion_main!(benches);

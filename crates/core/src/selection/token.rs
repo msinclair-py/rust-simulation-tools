@@ -18,6 +18,7 @@ pub enum Token {
     Type,
     // Range keywords
     Resid,
+    Resindex,
     Index,
     // Numeric keywords
     Mass,
@@ -55,6 +56,7 @@ pub enum Token {
     Comma,
     Dash,
     Colon,
+    To,
     // End
     Eof,
 }
@@ -209,6 +211,7 @@ impl<'a> Lexer<'a> {
             "resname" => Token::Resname,
             "type" => Token::Type,
             "resid" => Token::Resid,
+            "resindex" => Token::Resindex,
             "index" => Token::Index,
             "mass" => Token::Mass,
             "charge" => Token::Charge,
@@ -220,6 +223,7 @@ impl<'a> Lexer<'a> {
             "not" => Token::Not,
             "within" => Token::Within,
             "of" => Token::Of,
+            "to" => Token::To,
             "protein" => Token::Protein,
             "water" => Token::Water,
             "backbone" => Token::Backbone,

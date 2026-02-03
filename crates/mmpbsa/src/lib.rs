@@ -9,5 +9,8 @@ pub mod entropy;
 pub mod gb_energy;
 pub mod mdcrd;
 pub mod mm_energy;
+pub mod pb_energy;
+pub mod pb_grid;
+pub mod pb_solver;
 pub mod sa_energy;
 pub mod subsystem;

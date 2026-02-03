@@ -8,25 +8,37 @@
 
 use crate::gb_energy::{compute_gb_energy, GbParams};
 use crate::mdcrd::MdcrdReader;
-use crate::mm_energy::{build_14_pairs, build_exclusion_set, compute_mm_energy_with_nb, PairBitmap};
+use crate::mm_energy::{
+    build_14_pairs, build_exclusion_set, compute_mm_energy_with_nb, PairBitmap,
+};
+use crate::pb_energy::{compute_pb_energy, PbParams};
 use crate::sa_energy::{compute_sa_energy, SaParams};
-use crate::subsystem::{extract_coords, extract_coords_into, extract_subtopology};
+use crate::subsystem::{extract_coords, extract_subtopology};
 use rayon::prelude::*;
 use rst_core::amber::prmtop::AmberTopology;
 use rst_core::trajectory::dcd::DcdReader;
 use std::path::Path;
 
+/// Solvation method selection for polar solvation energy.
+#[derive(Debug, Clone)]
+pub enum SolvationMethod {
+    /// Generalized Born (fast, approximate).
+    GB(GbParams),
+    /// Poisson-Boltzmann (slower, more accurate).
+    PB(PbParams),
+}
+
 /// Energy components for a single subsystem in one frame.
 #[derive(Debug, Clone, Default)]
 pub struct SubsystemEnergy {
     pub mm: f64,
-    pub gb: f64,
+    pub polar: f64,
     pub sa: f64,
 }
 
 impl SubsystemEnergy {
     pub fn total(&self) -> f64 {
-        self.mm + self.gb + self.sa
+        self.mm + self.polar + self.sa
     }
 }
 
@@ -37,7 +49,7 @@ pub struct FrameEnergy {
     pub receptor: SubsystemEnergy,
     pub ligand: SubsystemEnergy,
     pub delta_mm: f64,
-    pub delta_gb: f64,
+    pub delta_polar: f64,
     pub delta_sa: f64,
     pub delta_total: f64,
 }
@@ -47,12 +59,12 @@ pub struct FrameEnergy {
 pub struct BindingResult {
     pub frames: Vec<FrameEnergy>,
     pub mean_delta_mm: f64,
-    pub mean_delta_gb: f64,
+    pub mean_delta_polar: f64,
     pub mean_delta_sa: f64,
     pub mean_delta_total: f64,
     pub std_delta_total: f64,
     pub std_delta_mm: f64,
-    pub std_delta_gb: f64,
+    pub std_delta_polar: f64,
     pub std_delta_sa: f64,
     /// Standard error of the mean for delta_total.
     pub sem_delta_total: f64,
@@ -81,8 +93,8 @@ pub struct BindingConfig {
     pub receptor_residues: Vec<usize>,
     /// 0-based residue indices for the ligand.
     pub ligand_residues: Vec<usize>,
-    /// GB calculation parameters.
-    pub gb_params: GbParams,
+    /// Polar solvation method (GB or PB).
+    pub solvation_method: SolvationMethod,
     /// SA calculation parameters.
     pub sa_params: SaParams,
     /// Trajectory file format (defaults to Mdcrd without box).
@@ -209,6 +221,14 @@ fn slice_frame_to_complex(
     }
 }
 
+/// Compute polar solvation energy for a subsystem using the selected method.
+fn compute_polar_energy(top: &AmberTopology, coords: &[[f64; 3]], method: &SolvationMethod) -> f64 {
+    match method {
+        SolvationMethod::GB(gb_params) => compute_gb_energy(top, coords, gb_params).total,
+        SolvationMethod::PB(pb_params) => compute_pb_energy(top, coords, pb_params).total,
+    }
+}
+
 fn compute_frame_energy(
     complex_top: &AmberTopology,
     receptor_top: &AmberTopology,
@@ -216,73 +236,78 @@ fn compute_frame_energy(
     receptor_atoms: &[usize],
     ligand_atoms: &[usize],
     coords: &[[f64; 3]],
-    gb_params: &GbParams,
+    solvation_method: &SolvationMethod,
     sa_params: &SaParams,
     nb_sets: &PrebuiltNbSets,
-    receptor_buf: &mut Vec<[f64; 3]>,
-    ligand_buf: &mut Vec<[f64; 3]>,
 ) -> FrameEnergy {
-    // Complex energies
-    let c_mm = compute_mm_energy_with_nb(
-        complex_top,
-        coords,
-        &nb_sets.complex_excluded,
-        &nb_sets.complex_14,
-    );
-    let c_gb = compute_gb_energy(complex_top, coords, gb_params);
-    let c_sa = compute_sa_energy(complex_top, coords, sa_params);
+    // Extract receptor and ligand coordinates upfront
+    let r_coords = extract_coords(coords, receptor_atoms);
+    let l_coords = extract_coords(coords, ligand_atoms);
 
-    // Receptor energies (extract coordinates into pre-allocated buffer)
-    extract_coords_into(coords, receptor_atoms, receptor_buf);
-    let r_coords = receptor_buf.as_slice();
-    let r_mm = compute_mm_energy_with_nb(
-        receptor_top,
-        r_coords,
-        &nb_sets.receptor_excluded,
-        &nb_sets.receptor_14,
+    // Compute all three subsystems in parallel using nested rayon::join
+    let (complex_e, (receptor_e, ligand_e)) = rayon::join(
+        || {
+            let c_mm = compute_mm_energy_with_nb(
+                complex_top,
+                coords,
+                &nb_sets.complex_excluded,
+                &nb_sets.complex_14,
+            );
+            let c_polar = compute_polar_energy(complex_top, coords, solvation_method);
+            let c_sa = compute_sa_energy(complex_top, coords, sa_params);
+            SubsystemEnergy {
+                mm: c_mm.total(),
+                polar: c_polar,
+                sa: c_sa.total,
+            }
+        },
+        || {
+            rayon::join(
+                || {
+                    let r_mm = compute_mm_energy_with_nb(
+                        receptor_top,
+                        &r_coords,
+                        &nb_sets.receptor_excluded,
+                        &nb_sets.receptor_14,
+                    );
+                    let r_polar = compute_polar_energy(receptor_top, &r_coords, solvation_method);
+                    let r_sa = compute_sa_energy(receptor_top, &r_coords, sa_params);
+                    SubsystemEnergy {
+                        mm: r_mm.total(),
+                        polar: r_polar,
+                        sa: r_sa.total,
+                    }
+                },
+                || {
+                    let l_mm = compute_mm_energy_with_nb(
+                        ligand_top,
+                        &l_coords,
+                        &nb_sets.ligand_excluded,
+                        &nb_sets.ligand_14,
+                    );
+                    let l_polar = compute_polar_energy(ligand_top, &l_coords, solvation_method);
+                    let l_sa = compute_sa_energy(ligand_top, &l_coords, sa_params);
+                    SubsystemEnergy {
+                        mm: l_mm.total(),
+                        polar: l_polar,
+                        sa: l_sa.total,
+                    }
+                },
+            )
+        },
     );
-    let r_gb = compute_gb_energy(receptor_top, r_coords, gb_params);
-    let r_sa = compute_sa_energy(receptor_top, r_coords, sa_params);
-
-    // Ligand energies
-    extract_coords_into(coords, ligand_atoms, ligand_buf);
-    let l_coords = ligand_buf.as_slice();
-    let l_mm = compute_mm_energy_with_nb(
-        ligand_top,
-        l_coords,
-        &nb_sets.ligand_excluded,
-        &nb_sets.ligand_14,
-    );
-    let l_gb = compute_gb_energy(ligand_top, l_coords, gb_params);
-    let l_sa = compute_sa_energy(ligand_top, l_coords, sa_params);
-
-    let complex_e = SubsystemEnergy {
-        mm: c_mm.total(),
-        gb: c_gb.total,
-        sa: c_sa.total,
-    };
-    let receptor_e = SubsystemEnergy {
-        mm: r_mm.total(),
-        gb: r_gb.total,
-        sa: r_sa.total,
-    };
-    let ligand_e = SubsystemEnergy {
-        mm: l_mm.total(),
-        gb: l_gb.total,
-        sa: l_sa.total,
-    };
 
     let delta_mm = complex_e.mm - receptor_e.mm - ligand_e.mm;
-    let delta_gb = complex_e.gb - receptor_e.gb - ligand_e.gb;
+    let delta_polar = complex_e.polar - receptor_e.polar - ligand_e.polar;
     let delta_sa = complex_e.sa - receptor_e.sa - ligand_e.sa;
-    let delta_total = delta_mm + delta_gb + delta_sa;
+    let delta_total = delta_mm + delta_polar + delta_sa;
 
     FrameEnergy {
         complex: complex_e,
         receptor: receptor_e,
         ligand: ligand_e,
         delta_mm,
-        delta_gb,
+        delta_polar,
         delta_sa,
         delta_total,
     }
@@ -296,12 +321,10 @@ fn process_frame(
     receptor_sel: &rst_core::amber::prmtop::AtomSelection,
     ligand_sel: &rst_core::amber::prmtop::AtomSelection,
     coords: &[[f64; 3]],
-    gb_params: &GbParams,
+    solvation_method: &SolvationMethod,
     sa_params: &SaParams,
     frame_index: usize,
     nb_sets: &PrebuiltNbSets,
-    receptor_buf: &mut Vec<[f64; 3]>,
-    ligand_buf: &mut Vec<[f64; 3]>,
 ) -> FrameEnergy {
     let energy = compute_frame_energy(
         complex_top,
@@ -310,18 +333,16 @@ fn process_frame(
         &receptor_sel.atom_indices,
         &ligand_sel.atom_indices,
         coords,
-        gb_params,
+        solvation_method,
         sa_params,
         nb_sets,
-        receptor_buf,
-        ligand_buf,
     );
     log::debug!(
-        "Frame {}: ΔG = {:.2} (ΔMM={:.2}, ΔGB={:.2}, ΔSA={:.2})",
+        "Frame {}: ΔG = {:.2} (ΔMM={:.2}, ΔPolar={:.2}, ΔSA={:.2})",
         frame_index + 1,
         energy.delta_total,
         energy.delta_mm,
-        energy.delta_gb,
+        energy.delta_polar,
         energy.delta_sa,
     );
     energy
@@ -390,7 +411,7 @@ pub fn compute_binding_energy(
                          ligand_top: &AmberTopology,
                          receptor_sel: &rst_core::amber::prmtop::AtomSelection,
                          ligand_sel: &rst_core::amber::prmtop::AtomSelection,
-                         gb_params: &GbParams,
+                         solvation_method: &SolvationMethod,
                          sa_params: &SaParams,
                          nb_sets: &PrebuiltNbSets|
      -> Vec<FrameEnergy> {
@@ -400,32 +421,25 @@ pub fn compute_binding_energy(
             batch
                 .par_iter()
                 .enumerate()
-                .map_init(
-                    || (Vec::new(), Vec::new()),
-                    |(r_buf, l_buf), (idx, coords)| {
-                        process_frame(
-                            effective_complex_top,
-                            receptor_top,
-                            ligand_top,
-                            receptor_sel,
-                            ligand_sel,
-                            coords,
-                            gb_params,
-                            sa_params,
-                            start_idx + idx,
-                            nb_sets,
-                            r_buf,
-                            l_buf,
-                        )
-                    },
-                )
+                .map(|(idx, coords)| {
+                    process_frame(
+                        effective_complex_top,
+                        receptor_top,
+                        ligand_top,
+                        receptor_sel,
+                        ligand_sel,
+                        coords,
+                        solvation_method,
+                        sa_params,
+                        start_idx + idx,
+                        nb_sets,
+                    )
+                })
                 .collect()
         } else {
-            // Few frames — process sequentially to let inner atom-level
-            // parallelism (in MM, GB, SA) fully utilize all cores
+            // Few frames — process sequentially to let inner subsystem-level
+            // parallelism (via nested rayon::join) fully utilize all cores
             let mut results = Vec::with_capacity(batch.len());
-            let mut r_buf = Vec::new();
-            let mut l_buf = Vec::new();
             for (idx, coords) in batch.iter().enumerate() {
                 results.push(process_frame(
                     effective_complex_top,
@@ -434,12 +448,10 @@ pub fn compute_binding_energy(
                     receptor_sel,
                     ligand_sel,
                     coords,
-                    gb_params,
+                    solvation_method,
                     sa_params,
                     start_idx + idx,
                     nb_sets,
-                    &mut r_buf,
-                    &mut l_buf,
                 ));
             }
             results
@@ -469,7 +481,7 @@ pub fn compute_binding_energy(
                             &ligand_top,
                             &receptor_sel,
                             &ligand_sel,
-                            &config.gb_params,
+                            &config.solvation_method,
                             &config.sa_params,
                             &nb_sets,
                         );
@@ -490,7 +502,7 @@ pub fn compute_binding_energy(
                     &ligand_top,
                     &receptor_sel,
                     &ligand_sel,
-                    &config.gb_params,
+                    &config.solvation_method,
                     &config.sa_params,
                     &nb_sets,
                 );
@@ -523,7 +535,7 @@ pub fn compute_binding_energy(
                             &ligand_top,
                             &receptor_sel,
                             &ligand_sel,
-                            &config.gb_params,
+                            &config.solvation_method,
                             &config.sa_params,
                             &nb_sets,
                         );
@@ -544,7 +556,7 @@ pub fn compute_binding_energy(
                     &ligand_top,
                     &receptor_sel,
                     &ligand_sel,
-                    &config.gb_params,
+                    &config.solvation_method,
                     &config.sa_params,
                     &nb_sets,
                 );
@@ -569,7 +581,7 @@ pub fn compute_binding_energy(
     // Compute statistics
     let n = frames.len() as f64;
     let mean_delta_mm: f64 = frames.iter().map(|f| f.delta_mm).sum::<f64>() / n;
-    let mean_delta_gb: f64 = frames.iter().map(|f| f.delta_gb).sum::<f64>() / n;
+    let mean_delta_polar: f64 = frames.iter().map(|f| f.delta_polar).sum::<f64>() / n;
     let mean_delta_sa: f64 = frames.iter().map(|f| f.delta_sa).sum::<f64>() / n;
     let mean_delta_total: f64 = frames.iter().map(|f| f.delta_total).sum::<f64>() / n;
 
@@ -584,24 +596,24 @@ pub fn compute_binding_energy(
 
     let delta_totals: Vec<f64> = frames.iter().map(|f| f.delta_total).collect();
     let delta_mms: Vec<f64> = frames.iter().map(|f| f.delta_mm).collect();
-    let delta_gbs: Vec<f64> = frames.iter().map(|f| f.delta_gb).collect();
+    let delta_polars: Vec<f64> = frames.iter().map(|f| f.delta_polar).collect();
     let delta_sas: Vec<f64> = frames.iter().map(|f| f.delta_sa).collect();
 
     let std_delta_total = sample_std(&delta_totals, mean_delta_total);
     let std_delta_mm = sample_std(&delta_mms, mean_delta_mm);
-    let std_delta_gb = sample_std(&delta_gbs, mean_delta_gb);
+    let std_delta_polar = sample_std(&delta_polars, mean_delta_polar);
     let std_delta_sa = sample_std(&delta_sas, mean_delta_sa);
     let sem_delta_total = std_delta_total / n.sqrt();
 
     Ok(BindingResult {
         frames,
         mean_delta_mm,
-        mean_delta_gb,
+        mean_delta_polar,
         mean_delta_sa,
         mean_delta_total,
         std_delta_total,
         std_delta_mm,
-        std_delta_gb,
+        std_delta_polar,
         std_delta_sa,
         sem_delta_total,
         last_frame_coords,
@@ -637,8 +649,6 @@ pub fn compute_binding_energy_single_frame(
         ligand_14: build_14_pairs(&ligand_top),
     };
 
-    let mut r_buf = Vec::new();
-    let mut l_buf = Vec::new();
     Ok(compute_frame_energy(
         &effective_complex_top,
         &receptor_top,
@@ -646,11 +656,9 @@ pub fn compute_binding_energy_single_frame(
         &receptor_sel.atom_indices,
         &ligand_sel.atom_indices,
         &complex_coords,
-        &config.gb_params,
+        &config.solvation_method,
         &config.sa_params,
         &nb_sets,
-        &mut r_buf,
-        &mut l_buf,
     ))
 }
 
@@ -687,11 +695,11 @@ mod tests {
         let config = BindingConfig {
             receptor_residues,
             ligand_residues,
-            gb_params: GbParams {
+            solvation_method: SolvationMethod::GB(GbParams {
                 model: GbModel::ObcI,
                 salt_concentration: 0.15,
                 ..GbParams::default()
-            },
+            }),
             sa_params: SaParams::default(),
             trajectory_format: TrajectoryFormat::Mdcrd { has_box: false },
             stride: 1,
@@ -705,7 +713,7 @@ mod tests {
         // Sanity checks: delta values should be finite and in a reasonable range
         assert!(result.delta_total.is_finite(), "Total energy is not finite");
         assert!(result.delta_mm.is_finite(), "MM energy is not finite");
-        assert!(result.delta_gb.is_finite(), "GB energy is not finite");
+        assert!(result.delta_polar.is_finite(), "Polar energy is not finite");
         assert!(result.delta_sa.is_finite(), "SA energy is not finite");
 
         // SA should be negative (buried surface upon binding)
@@ -716,8 +724,8 @@ mod tests {
         );
 
         println!(
-            "ΔG = {:.2} kcal/mol (ΔMM={:.2}, ΔGB={:.2}, ΔSA={:.2})",
-            result.delta_total, result.delta_mm, result.delta_gb, result.delta_sa
+            "ΔG = {:.2} kcal/mol (ΔMM={:.2}, ΔPolar={:.2}, ΔSA={:.2})",
+            result.delta_total, result.delta_mm, result.delta_polar, result.delta_sa
         );
     }
 }

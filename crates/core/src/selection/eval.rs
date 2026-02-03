@@ -90,7 +90,8 @@ impl<'a> SelectionContext<'a> {
                 for i in 0..n {
                     let val = match field {
                         RangeField::Resid => (residue_indices[i] as i64) + 1, // 1-based
-                        RangeField::Index => i as i64,                        // 0-based
+                        RangeField::Resindex => residue_indices[i] as i64,    // 0-based
+                        RangeField::Index => i as i64,                        // 0-based atom
                     };
                     mask[i] = ranges.iter().any(|r| r.contains(val));
                 }
@@ -490,5 +491,60 @@ mod tests {
         let ctx = SelectionContext::new(&top);
         let result = ctx.eval_str("(protein or water) and not hydrogen").unwrap();
         assert_eq!(result, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_select_resindex() {
+        let top = make_test_topology();
+        let ctx = SelectionContext::new(&top);
+        // resindex is 0-based, so resindex 0 = first residue = ALA
+        let result = ctx.eval_str("resindex 0").unwrap();
+        assert_eq!(result, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_select_resindex_range() {
+        let top = make_test_topology();
+        let ctx = SelectionContext::new(&top);
+        // resindex 0-1 is inclusive [0, 1], selecting both residues
+        let result = ctx.eval_str("resindex 0-1").unwrap();
+        assert_eq!(result, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_select_resindex_half_open() {
+        let top = make_test_topology();
+        let ctx = SelectionContext::new(&top);
+        // resindex 0:1 is half-open [0, 1), selecting only residue 0
+        let result = ctx.eval_str("resindex 0:1").unwrap();
+        assert_eq!(result, vec![0, 1, 2]);
+
+        // resindex 0:2 is half-open [0, 2), selecting residues 0 and 1
+        let result = ctx.eval_str("resindex 0:2").unwrap();
+        assert_eq!(result, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_select_resid_half_open() {
+        let top = make_test_topology();
+        let ctx = SelectionContext::new(&top);
+        // resid 1:2 is half-open [1, 2) in 1-based terms, selecting only resid 1
+        let result = ctx.eval_str("resid 1:2").unwrap();
+        assert_eq!(result, vec![0, 1, 2]);
+
+        // resid 1:3 is half-open [1, 3), selecting resids 1 and 2 (all atoms)
+        let result = ctx.eval_str("resid 1:3").unwrap();
+        assert_eq!(result, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_resid_vs_resindex_equivalence() {
+        let top = make_test_topology();
+        let ctx = SelectionContext::new(&top);
+        // These should be equivalent: resindex 0:2 and resid 1:3
+        // Both select residues 0 and 1 (resids 1 and 2)
+        let resindex_result = ctx.eval_str("resindex 0:2").unwrap();
+        let resid_result = ctx.eval_str("resid 1:3").unwrap();
+        assert_eq!(resindex_result, resid_result);
     }
 }

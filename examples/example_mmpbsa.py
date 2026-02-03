@@ -16,11 +16,13 @@ from rust_simulation_tools import (
     read_inpcrd,
     GbModel,
     GbParams,
+    PbParams,
     SaParams,
     MdcrdReader,
     compute_mm_energy,
     compute_gb_energy,
     compute_sa_energy,
+    compute_pb_energy,
     compute_binding_energy,
     compute_binding_energy_single_frame,
     decompose_binding_energy,
@@ -114,7 +116,6 @@ def example_trajectory_binding():
         trajectory_format="dcd",
         stride=1,
         start_frame=0,
-        end_frame=0,  # 0 = all frames
     )
 
     print(f"Frames analyzed: {len(result.frames)}")
@@ -173,6 +174,47 @@ def example_decomposition():
     for res in ligand[:5]:
         label = f"{res.residue_label}{res.residue_index}"
         print(f"  {label}: {res.total():.2f}")
+
+
+def example_pb_binding():
+    """Compute binding free energy using Poisson-Boltzmann solvation."""
+    print("\n=== PB Binding Energy ===\n")
+
+    topo = read_prmtop("data/mmpbsa.prmtop")
+    coords, _ = read_inpcrd("data/mmpbsa.inpcrd")
+
+    receptor_residues = list(range(0, 307))
+    ligand_residues = list(range(307, 366))
+
+    # Use PB instead of GB for polar solvation
+    pb_params = PbParams(
+        grid_spacing=0.5,
+        solute_dielectric=1.0,
+        solvent_dielectric=80.0,
+        salt_concentration=0.15,
+    )
+
+    # Works directly with solvated topologies — solvent is stripped automatically
+    # based on the receptor + ligand residue selections.
+    frame = compute_binding_energy_single_frame(
+        topo, coords,
+        receptor_residues=receptor_residues,
+        ligand_residues=ligand_residues,
+        pb_params=pb_params,
+        sa_params=SaParams(),
+    )
+
+    print(f"Binding Energy (PB solvation):")
+    print(f"  Delta MM:    {frame.delta_mm:10.2f} kcal/mol")
+    print(f"  Delta Polar: {frame.delta_polar:10.2f} kcal/mol")
+    print(f"  Delta SA:    {frame.delta_sa:10.2f} kcal/mol")
+    print(f"  Delta Total: {frame.delta_total:10.2f} kcal/mol")
+
+    # Standalone PB energy on a solvated system — pass solute_residues to
+    # auto-strip solvent without writing a desolvated topology to disk.
+    solute_residues = receptor_residues + ligand_residues
+    pb = compute_pb_energy(topo, coords, pb_params, solute_residues=solute_residues)
+    print(f"\n  Standalone PB energy (solvated input): {pb.total:.2f} kcal/mol")
 
 
 def example_mdcrd_reader():
@@ -257,7 +299,7 @@ def example_solvated_binding():
         gb_params=GbParams(model=GbModel.ObcII),
         sa_params=SaParams(),
         trajectory_format="dcd",
-        stride=10,
+        stride=1,
     )
 
     print(f"\nTrajectory ({len(result.frames)} frames):")
@@ -296,6 +338,7 @@ if __name__ == "__main__":
         "binding":      example_binding_energy_single_frame,
         "trajectory":   example_trajectory_binding,
         "decomp":       example_decomposition,
+        "pb":           example_pb_binding,
         "mdcrd":        example_mdcrd_reader,
         "subtopo":      example_subtopology,
         "solvated":     example_solvated_binding,
