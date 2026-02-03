@@ -190,7 +190,7 @@ pub fn auto_grid(coords: &[[f64; 3]], spacing: f64, buffer: f64) -> PbGrid {
         let extent = max[d] - min[d] + 2.0 * buffer;
         let n = (extent / spacing).ceil() as usize + 1;
         // Ensure odd
-        dims[d] = if n % 2 == 0 { n + 1 } else { n };
+        dims[d] = if n.is_multiple_of(2) { n + 1 } else { n };
         let grid_extent = (dims[d] - 1) as f64 * spacing;
         let center = 0.5 * (min[d] + max[d]);
         origin[d] = center - 0.5 * grid_extent;

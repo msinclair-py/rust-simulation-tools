@@ -467,7 +467,7 @@ pub fn compute_binding_energy(
                 if frame_idx >= end_frame {
                     break;
                 }
-                if frame_idx >= start_frame && (frame_idx - start_frame) % stride == 0 {
+                if frame_idx >= start_frame && (frame_idx - start_frame).is_multiple_of(stride) {
                     let coords = slice_frame_to_complex(&coords, &complex_atom_indices);
                     last_frame_coords = coords.clone();
                     batch.push(coords);
@@ -517,7 +517,7 @@ pub fn compute_binding_energy(
                 if frame_idx >= end_frame {
                     break;
                 }
-                if frame_idx >= start_frame && (frame_idx - start_frame) % stride == 0 {
+                if frame_idx >= start_frame && (frame_idx - start_frame).is_multiple_of(stride) {
                     let coords: Vec<[f64; 3]> = coords_nm
                         .iter()
                         .map(|c| [c[0] * 10.0, c[1] * 10.0, c[2] * 10.0])

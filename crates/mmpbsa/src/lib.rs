@@ -3,6 +3,12 @@
 //! Provides Generalized Born (GB) and Poisson-Boltzmann (PB) solvation
 //! calculations with per-residue decomposition.
 
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::len_without_is_empty)]
+#![allow(clippy::doc_lazy_continuation)]
+
 pub mod binding;
 pub mod decomposition;
 pub mod entropy;

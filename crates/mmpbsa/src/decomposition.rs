@@ -114,6 +114,99 @@ pub fn decompose_binding_energy_with_precomputed(
     )
 }
 
+/// Build the effective complex subsystem from receptor + ligand residues.
+///
+/// If the union of receptor and ligand residues covers all atoms in the
+/// topology, this is a no-op (returns cloned topology and coordinates).
+/// Otherwise, it extracts a complex sub-topology and remaps receptor/ligand
+/// selections to be relative to that sub-topology.
+///
+/// Returns `(effective_complex_top, effective_coords, receptor_sel, ligand_sel, remapped_receptor_residues, remapped_ligand_residues)`.
+fn build_effective_complex(
+    topology: &AmberTopology,
+    coords: &[[f64; 3]],
+    receptor_residues: &[usize],
+    ligand_residues: &[usize],
+) -> Result<
+    (
+        AmberTopology,
+        Vec<[f64; 3]>,
+        rst_core::amber::prmtop::AtomSelection,
+        rst_core::amber::prmtop::AtomSelection,
+        Vec<usize>,
+        Vec<usize>,
+    ),
+    String,
+> {
+    use std::collections::BTreeSet;
+
+    // Combine receptor + ligand residues into a sorted, deduplicated list.
+    let complex_residues: Vec<usize> = {
+        let mut set = BTreeSet::new();
+        set.extend(receptor_residues.iter().copied());
+        set.extend(ligand_residues.iter().copied());
+        set.into_iter().collect()
+    };
+
+    // Build complex atom selection on the original topology.
+    let complex_sel = topology.build_selection(&complex_residues)?;
+
+    // Fast path: complex covers all atoms — no extraction needed.
+    if complex_sel.atom_indices.len() == topology.n_atoms {
+        let receptor_sel = topology.build_selection(receptor_residues)?;
+        let ligand_sel = topology.build_selection(ligand_residues)?;
+        return Ok((
+            topology.clone(),
+            coords.to_vec(),
+            receptor_sel,
+            ligand_sel,
+            receptor_residues.to_vec(),
+            ligand_residues.to_vec(),
+        ));
+    }
+
+    // Solvated path: extract a complex sub-topology.
+    log::info!(
+        "Decomposition: solvated topology detected ({} total atoms). Extracting complex sub-topology ({} atoms from {} residues).",
+        topology.n_atoms,
+        complex_sel.atom_indices.len(),
+        complex_residues.len(),
+    );
+
+    let complex_top = extract_subtopology(topology, &complex_sel.atom_indices);
+    let complex_coords = extract_coords(coords, &complex_sel.atom_indices);
+
+    // Re-map receptor/ligand residue indices from original to complex-local.
+    // The complex sub-topology has residues numbered 0..N corresponding to
+    // the sorted complex_residues list.
+    let orig_to_complex_res: std::collections::HashMap<usize, usize> = complex_residues
+        .iter()
+        .enumerate()
+        .map(|(new, &orig)| (orig, new))
+        .collect();
+
+    let remapped_receptor: Vec<usize> = receptor_residues
+        .iter()
+        .map(|r| orig_to_complex_res[r])
+        .collect();
+    let remapped_ligand: Vec<usize> = ligand_residues
+        .iter()
+        .map(|r| orig_to_complex_res[r])
+        .collect();
+
+    let receptor_sel = complex_top.build_selection(&remapped_receptor)?;
+    let ligand_sel = complex_top.build_selection(&remapped_ligand)?;
+
+    Ok((
+        complex_top,
+        complex_coords,
+        receptor_sel,
+        ligand_sel,
+        remapped_receptor,
+        remapped_ligand,
+    ))
+}
+
 fn decompose_binding_energy_impl(
     complex_top: &AmberTopology,
     coords: &[[f64; 3]],
@@ -123,20 +216,22 @@ fn decompose_binding_energy_impl(
     sa_params: &SaParams,
     precomputed: Option<PrecomputedEnergies>,
 ) -> Result<DecompositionResult, String> {
-    let atom_res = complex_top.atom_residue_indices();
+    // Handle solvated topologies: extract complex sub-topology if needed
+    let (
+        effective_complex_top,
+        complex_coords,
+        rec_sel,
+        lig_sel,
+        orig_receptor_residues,
+        orig_ligand_residues,
+    ) = build_effective_complex(complex_top, coords, receptor_residues, ligand_residues)?;
 
-    // Build atom sets for receptor and ligand
-    let rec_sel = complex_top
-        .build_selection(receptor_residues)
-        .map_err(|e| format!("Invalid receptor residues: {}", e))?;
-    let lig_sel = complex_top
-        .build_selection(ligand_residues)
-        .map_err(|e| format!("Invalid ligand residues: {}", e))?;
-    // Build exclusion and 1-4 sets for the complex
-    let excluded = build_exclusion_set(complex_top);
-    let pairs_14 = build_14_pairs(complex_top);
-    let scee = complex_top.scee_scale_factor;
-    let scnb = complex_top.scnb_scale_factor;
+    let atom_res = effective_complex_top.atom_residue_indices();
+    // Build exclusion and 1-4 sets for the effective complex (not the original solvated topology)
+    let excluded = build_exclusion_set(&effective_complex_top);
+    let pairs_14 = build_14_pairs(&effective_complex_top);
+    let scee = effective_complex_top.scee_scale_factor;
+    let scnb = effective_complex_top.scnb_scale_factor;
 
     // Accumulate pairwise vdW + elec per residue (receptor↔ligand only)
     let mut res_vdw: HashMap<usize, f64> = HashMap::new();
@@ -145,9 +240,9 @@ fn decompose_binding_energy_impl(
     for &ri in &rec_sel.atom_indices {
         for &li in &lig_sel.atom_indices {
             let (i, j) = if ri < li { (ri, li) } else { (li, ri) };
-            let dx = coords[ri][0] - coords[li][0];
-            let dy = coords[ri][1] - coords[li][1];
-            let dz = coords[ri][2] - coords[li][2];
+            let dx = complex_coords[ri][0] - complex_coords[li][0];
+            let dy = complex_coords[ri][1] - complex_coords[li][1];
+            let dz = complex_coords[ri][2] - complex_coords[li][2];
             let r = (dx * dx + dy * dy + dz * dz).sqrt();
             if r < 1e-10 {
                 continue;
@@ -157,20 +252,20 @@ fn decompose_binding_energy_impl(
                 let r2 = r * r;
                 let r6 = r2 * r2 * r2;
                 let r12 = r6 * r6;
-                let (a, b) = lj_ab(complex_top, ri, li);
+                let (a, b) = lj_ab(&effective_complex_top, ri, li);
                 let vdw = (a / r12 - b / r6) / scnb;
-                let qi = complex_top.charges_amber[ri];
-                let qj = complex_top.charges_amber[li];
+                let qi = effective_complex_top.charges_amber[ri];
+                let qj = effective_complex_top.charges_amber[li];
                 let elec = qi * qj / r / scee;
                 (vdw, elec)
             } else if !excluded.contains(i, j) {
                 let r2 = r * r;
                 let r6 = r2 * r2 * r2;
                 let r12 = r6 * r6;
-                let (a, b) = lj_ab(complex_top, ri, li);
+                let (a, b) = lj_ab(&effective_complex_top, ri, li);
                 let vdw = a / r12 - b / r6;
-                let qi = complex_top.charges_amber[ri];
-                let qj = complex_top.charges_amber[li];
+                let qi = effective_complex_top.charges_amber[ri];
+                let qj = effective_complex_top.charges_amber[li];
                 let elec = qi * qj / r;
                 (vdw, elec)
             } else {
@@ -190,10 +285,10 @@ fn decompose_binding_energy_impl(
     // Extract subtopologies and coordinates for receptor and ligand (needed
     // for both GB and SA when not using precomputed values, and also used
     // later for SA per-atom distribution even with precomputed values).
-    let rec_sub_top = extract_subtopology(complex_top, &rec_sel.atom_indices);
-    let rec_coords = extract_coords(coords, &rec_sel.atom_indices);
-    let lig_sub_top = extract_subtopology(complex_top, &lig_sel.atom_indices);
-    let lig_coords = extract_coords(coords, &lig_sel.atom_indices);
+    let rec_sub_top = extract_subtopology(&effective_complex_top, &rec_sel.atom_indices);
+    let rec_coords = extract_coords(&complex_coords, &rec_sel.atom_indices);
+    let lig_sub_top = extract_subtopology(&effective_complex_top, &lig_sel.atom_indices);
+    let lig_coords = extract_coords(&complex_coords, &lig_sel.atom_indices);
 
     // GB decomposition: per-atom ΔGB = GB(complex) - GB(receptor/ligand)
     // Compute Born radii and GB energy for all three systems
@@ -204,7 +299,8 @@ fn decompose_binding_energy_impl(
             pre.ligand_gb.clone(),
         )
     } else {
-        let complex_gb = crate::gb_energy::compute_gb_energy(complex_top, coords, gb_params);
+        let complex_gb =
+            crate::gb_energy::compute_gb_energy(&effective_complex_top, &complex_coords, gb_params);
         let rec_gb = crate::gb_energy::compute_gb_energy(&rec_sub_top, &rec_coords, gb_params);
         let lig_gb = crate::gb_energy::compute_gb_energy(&lig_sub_top, &lig_coords, gb_params);
         (complex_gb, rec_gb, lig_gb)
@@ -218,12 +314,12 @@ fn decompose_binding_energy_impl(
     // Compute per-atom self-energy change as a proxy for distribution
     let dielectric_factor =
         -0.5 * (1.0 / gb_params.solute_dielectric - 1.0 / gb_params.solvent_dielectric);
-    let mut atom_gb_weights: Vec<f64> = Vec::with_capacity(complex_top.n_atoms);
+    let mut atom_gb_weights: Vec<f64> = Vec::with_capacity(effective_complex_top.n_atoms);
     let mut total_weight = 0.0f64;
 
     // For receptor atoms
     for (local_i, &global_i) in rec_sel.atom_indices.iter().enumerate() {
-        let q = complex_top.charges_amber[global_i];
+        let q = effective_complex_top.charges_amber[global_i];
         let self_complex = dielectric_factor * q * q / complex_gb.born_radii[global_i];
         let self_isolated = dielectric_factor * q * q / rec_gb.born_radii[local_i];
         let w = (self_complex - self_isolated).abs();
@@ -232,7 +328,7 @@ fn decompose_binding_energy_impl(
     }
     // For ligand atoms
     for (local_i, &global_i) in lig_sel.atom_indices.iter().enumerate() {
-        let q = complex_top.charges_amber[global_i];
+        let q = effective_complex_top.charges_amber[global_i];
         let self_complex = dielectric_factor * q * q / complex_gb.born_radii[global_i];
         let self_isolated = dielectric_factor * q * q / lig_gb.born_radii[local_i];
         let w = (self_complex - self_isolated).abs();
@@ -259,7 +355,8 @@ fn decompose_binding_energy_impl(
     let (complex_sa, rec_sa, lig_sa) = if let Some(pre) = precomputed {
         (pre.complex_sa, pre.receptor_sa, pre.ligand_sa)
     } else {
-        let complex_sa = crate::sa_energy::compute_sa_energy(complex_top, coords, sa_params);
+        let complex_sa =
+            crate::sa_energy::compute_sa_energy(&effective_complex_top, &complex_coords, sa_params);
         let rec_sa = crate::sa_energy::compute_sa_energy(&rec_sub_top, &rec_coords, sa_params);
         let lig_sa = crate::sa_energy::compute_sa_energy(&lig_sub_top, &lig_coords, sa_params);
         (complex_sa, rec_sa, lig_sa)
@@ -277,28 +374,32 @@ fn decompose_binding_energy_impl(
         *res_sa.entry(res).or_default() += sa_params.surface_tension * delta_sasa;
     }
 
-    // Assemble results
+    // Assemble results - use original residue indices for output, but remapped
+    // indices for HashMap lookups (since the internal computations used the
+    // effective complex topology with remapped residue numbering)
     let receptor_contributions: Vec<ResidueContribution> = receptor_residues
         .iter()
-        .map(|&r| ResidueContribution {
-            residue_index: r,
-            residue_label: complex_top.residue_labels[r].clone(),
-            vdw: *res_vdw.get(&r).unwrap_or(&0.0),
-            elec: *res_elec.get(&r).unwrap_or(&0.0),
-            polar: *res_gb.get(&r).unwrap_or(&0.0),
-            sa: *res_sa.get(&r).unwrap_or(&0.0),
+        .zip(orig_receptor_residues.iter())
+        .map(|(&orig_r, &remapped_r)| ResidueContribution {
+            residue_index: orig_r,
+            residue_label: complex_top.residue_labels[orig_r].clone(),
+            vdw: *res_vdw.get(&remapped_r).unwrap_or(&0.0),
+            elec: *res_elec.get(&remapped_r).unwrap_or(&0.0),
+            polar: *res_gb.get(&remapped_r).unwrap_or(&0.0),
+            sa: *res_sa.get(&remapped_r).unwrap_or(&0.0),
         })
         .collect();
 
     let ligand_contributions: Vec<ResidueContribution> = ligand_residues
         .iter()
-        .map(|&r| ResidueContribution {
-            residue_index: r,
-            residue_label: complex_top.residue_labels[r].clone(),
-            vdw: *res_vdw.get(&r).unwrap_or(&0.0),
-            elec: *res_elec.get(&r).unwrap_or(&0.0),
-            polar: *res_gb.get(&r).unwrap_or(&0.0),
-            sa: *res_sa.get(&r).unwrap_or(&0.0),
+        .zip(orig_ligand_residues.iter())
+        .map(|(&orig_r, &remapped_r)| ResidueContribution {
+            residue_index: orig_r,
+            residue_label: complex_top.residue_labels[orig_r].clone(),
+            vdw: *res_vdw.get(&remapped_r).unwrap_or(&0.0),
+            elec: *res_elec.get(&remapped_r).unwrap_or(&0.0),
+            polar: *res_gb.get(&remapped_r).unwrap_or(&0.0),
+            sa: *res_sa.get(&remapped_r).unwrap_or(&0.0),
         })
         .collect();
 

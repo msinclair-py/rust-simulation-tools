@@ -1,19 +1,36 @@
 //! Criterion benchmarks for the MM-PBSA energy components.
 //!
-//! Uses a synthetic topology and coordinates to benchmark each energy term
-//! independently, as well as the full single-frame binding energy workflow.
+//! Comprehensive benchmark suite covering:
+//! - MM energy calculation (with/without pre-built NB sets)
+//! - GB solvation energy (OBC-I and OBC-II models)
+//! - SA non-polar energy (Shrake-Rupley)
+//! - PB solvation energy (multigrid solver)
+//! - Per-residue decomposition
+//! - Full binding energy pipeline
+//! - Entropy estimation
+//! - NB set construction
 //!
 //! Run with: cargo bench -p rst-mmpbsa
+//! Run specific group: cargo bench -p rst-mmpbsa -- mm_energy
+//! Run with verbose output: cargo bench -p rst-mmpbsa -- --verbose
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rst_core::amber::prmtop::AmberTopology;
-use rst_mmpbsa::binding::{BindingConfig, SolvationMethod, TrajectoryFormat};
+use rst_mmpbsa::binding::{
+    BindingConfig, FrameEnergy, SolvationMethod, SubsystemEnergy, TrajectoryFormat,
+};
+use rst_mmpbsa::decomposition::decompose_binding_energy;
+use rst_mmpbsa::entropy::interaction_entropy;
 use rst_mmpbsa::gb_energy::{GbModel, GbParams};
 use rst_mmpbsa::mm_energy::{compute_mm_energy, compute_mm_energy_with_nb, PairBitmap};
 use rst_mmpbsa::pb_energy::{compute_pb_energy, PbParams};
 use rst_mmpbsa::sa_energy::{compute_sa_energy, SaParams};
 use std::f64::consts::PI;
 use std::sync::Arc;
+
+// ============================================================================
+// Synthetic Data Generation
+// ============================================================================
 
 /// Build a synthetic AmberTopology with `n_residues` residues, each containing
 /// `atoms_per_residue` atoms arranged as a simple chain. This produces a
@@ -95,7 +112,6 @@ fn build_synthetic_topology(n_residues: usize, atoms_per_residue: usize) -> Ambe
     }
 
     // Exclusion lists: exclude bonded neighbors (1-2 pairs)
-    // Build a simple exclusion list where each atom excludes its bonded partners
     let mut neighbors: Vec<Vec<usize>> = vec![vec![]; n_atoms];
     for &(a, b) in &bonds {
         neighbors[a].push(b);
@@ -188,19 +204,79 @@ fn build_nb_sets(topology: &AmberTopology) -> (PairBitmap, PairBitmap) {
     (excluded, pairs_14)
 }
 
-// ---------------------------------------------------------------------------
-// Benchmarks
-// ---------------------------------------------------------------------------
+/// Generate synthetic frame energies for entropy benchmarks.
+fn build_synthetic_frame_energies(n_frames: usize) -> Vec<FrameEnergy> {
+    (0..n_frames)
+        .map(|i| {
+            let phase = i as f64 * 0.1;
+            let delta_mm = -50.0 + 5.0 * phase.sin();
+            let delta_polar = 10.0 + 2.0 * (phase * 1.3).cos();
+            let delta_sa = -3.0 + 0.5 * (phase * 0.7).sin();
+            let delta_total = delta_mm + delta_polar + delta_sa;
+
+            // Create subsystem energies that produce the desired deltas
+            let complex = SubsystemEnergy {
+                mm: -100.0 + 3.0 * phase.sin(),
+                polar: 20.0 + phase.cos(),
+                sa: -5.0,
+            };
+            let receptor = SubsystemEnergy {
+                mm: complex.mm - delta_mm * 0.5,
+                polar: complex.polar - delta_polar * 0.5,
+                sa: complex.sa - delta_sa * 0.5,
+            };
+            let ligand = SubsystemEnergy {
+                mm: complex.mm - receptor.mm - delta_mm,
+                polar: complex.polar - receptor.polar - delta_polar,
+                sa: complex.sa - receptor.sa - delta_sa,
+            };
+
+            FrameEnergy {
+                complex,
+                receptor,
+                ligand,
+                delta_mm,
+                delta_polar,
+                delta_sa,
+                delta_total,
+            }
+        })
+        .collect()
+}
+
+// ============================================================================
+// System Size Configurations
+// ============================================================================
+
+/// Standard system sizes for benchmarking
+const SYSTEM_SIZES: &[(usize, usize)] = &[
+    (10, 10),  // 100 atoms - small
+    (30, 10),  // 300 atoms - medium
+    (100, 10), // 1000 atoms - large
+    (300, 10), // 3000 atoms - very large (optional)
+];
+
+/// Smaller sizes for expensive operations (PB, decomposition)
+const SMALL_SIZES: &[(usize, usize)] = &[
+    (5, 5),   // 25 atoms
+    (10, 10), // 100 atoms
+    (20, 10), // 200 atoms
+];
+
+// ============================================================================
+// MM Energy Benchmarks
+// ============================================================================
 
 fn bench_mm_energy(c: &mut Criterion) {
     let mut group = c.benchmark_group("mm_energy");
-    // Test multiple system sizes
-    for &(n_res, atoms_per_res) in &[(10, 10), (30, 10), (100, 10)] {
+
+    for &(n_res, atoms_per_res) in SYSTEM_SIZES.iter().take(3) {
         let top = build_synthetic_topology(n_res, atoms_per_res);
         let coords = build_synthetic_coords(top.n_atoms);
         let (excluded, pairs_14) = build_nb_sets(&top);
-
         let label = format!("{}atoms", top.n_atoms);
+
+        group.throughput(Throughput::Elements(top.n_atoms as u64));
 
         // With pre-built NB sets (the hot path in production)
         group.bench_with_input(
@@ -223,14 +299,21 @@ fn bench_mm_energy(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// GB Energy Benchmarks
+// ============================================================================
+
 fn bench_gb_energy(c: &mut Criterion) {
     let mut group = c.benchmark_group("gb_energy");
-    let gb_params = GbParams::default();
 
-    for &(n_res, atoms_per_res) in &[(10, 10), (30, 10), (100, 10)] {
+    // OBC-I at multiple sizes
+    for &(n_res, atoms_per_res) in SYSTEM_SIZES.iter().take(3) {
         let top = build_synthetic_topology(n_res, atoms_per_res);
         let coords = build_synthetic_coords(top.n_atoms);
         let label = format!("{}atoms", top.n_atoms);
+        let gb_params = GbParams::default();
+
+        group.throughput(Throughput::Elements(top.n_atoms as u64));
 
         group.bench_with_input(
             BenchmarkId::new("obc1", &label),
@@ -247,7 +330,7 @@ fn bench_gb_energy(c: &mut Criterion) {
         );
     }
 
-    // Also benchmark OBC-II at the medium size
+    // OBC-II comparison at medium size
     {
         let top = build_synthetic_topology(30, 10);
         let coords = build_synthetic_coords(top.n_atoms);
@@ -272,14 +355,20 @@ fn bench_gb_energy(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// SA Energy Benchmarks
+// ============================================================================
+
 fn bench_sa_energy(c: &mut Criterion) {
     let mut group = c.benchmark_group("sa_energy");
     let sa_params = SaParams::default();
 
-    for &(n_res, atoms_per_res) in &[(10, 10), (30, 10), (100, 10)] {
+    for &(n_res, atoms_per_res) in SYSTEM_SIZES.iter().take(3) {
         let top = build_synthetic_topology(n_res, atoms_per_res);
         let coords = build_synthetic_coords(top.n_atoms);
         let label = format!("{}atoms", top.n_atoms);
+
+        group.throughput(Throughput::Elements(top.n_atoms as u64));
 
         group.bench_with_input(
             BenchmarkId::new("shrake_rupley", &label),
@@ -289,8 +378,92 @@ fn bench_sa_energy(c: &mut Criterion) {
             },
         );
     }
+
+    // Benchmark with different sphere point counts
+    {
+        let top = build_synthetic_topology(30, 10);
+        let coords = build_synthetic_coords(top.n_atoms);
+
+        for n_points in [92, 162, 642, 960] {
+            let params = SaParams {
+                n_sphere_points: n_points,
+                ..SaParams::default()
+            };
+            let label = format!("{}pts_300atoms", n_points);
+
+            group.bench_with_input(
+                BenchmarkId::new("varying_precision", &label),
+                &(&top, &coords, &params),
+                |b, &(top, coords, params)| {
+                    b.iter(|| compute_sa_energy(black_box(top), black_box(coords), params));
+                },
+            );
+        }
+    }
     group.finish();
 }
+
+// ============================================================================
+// PB Energy Benchmarks
+// ============================================================================
+
+fn bench_pb_energy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pb_energy");
+    // PB is expensive — use small systems and limit sample size
+    group.sample_size(10);
+
+    for &(n_res, atoms_per_res) in SMALL_SIZES.iter().take(2) {
+        let top = build_synthetic_topology(n_res, atoms_per_res);
+        let coords = build_synthetic_coords(top.n_atoms);
+        let label = format!("{}atoms", top.n_atoms);
+
+        let params = PbParams {
+            grid_spacing: 0.5,
+            grid_buffer: 10.0,
+            tolerance: 1e-6,
+            max_iterations: 10000,
+            ..PbParams::default()
+        };
+
+        group.bench_with_input(
+            BenchmarkId::new("multigrid", &label),
+            &(&top, &coords, &params),
+            |b, &(top, coords, params)| {
+                b.iter(|| compute_pb_energy(black_box(top), black_box(coords), params));
+            },
+        );
+    }
+
+    // Grid spacing comparison
+    {
+        let top = build_synthetic_topology(10, 10);
+        let coords = build_synthetic_coords(top.n_atoms);
+
+        for spacing in [1.0, 0.5, 0.25] {
+            let params = PbParams {
+                grid_spacing: spacing,
+                grid_buffer: 10.0,
+                tolerance: 1e-6,
+                max_iterations: 10000,
+                ..PbParams::default()
+            };
+            let label = format!("{:.2}A_100atoms", spacing);
+
+            group.bench_with_input(
+                BenchmarkId::new("grid_spacing", &label),
+                &(&top, &coords, &params),
+                |b, &(top, coords, params)| {
+                    b.iter(|| compute_pb_energy(black_box(top), black_box(coords), params));
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+// ============================================================================
+// Full Binding Energy Pipeline Benchmarks
+// ============================================================================
 
 fn bench_binding_single_frame(c: &mut Criterion) {
     let mut group = c.benchmark_group("binding_single_frame");
@@ -313,7 +486,7 @@ fn bench_binding_single_frame(c: &mut Criterion) {
         };
 
         group.bench_with_input(
-            BenchmarkId::new("full_pipeline", &label),
+            BenchmarkId::new("gb_pipeline", &label),
             &(&top, &coords, &config),
             |b, &(top, coords, config)| {
                 b.iter(|| {
@@ -324,55 +497,6 @@ fn bench_binding_single_frame(c: &mut Criterion) {
                     )
                     .unwrap()
                 });
-            },
-        );
-    }
-    group.finish();
-}
-
-/// Benchmark NB set construction separately, since it is a one-time cost
-/// per topology that can dominate if done repeatedly.
-fn bench_nb_set_construction(c: &mut Criterion) {
-    let mut group = c.benchmark_group("nb_set_construction");
-
-    for &(n_res, atoms_per_res) in &[(10, 10), (30, 10), (100, 10)] {
-        let top = build_synthetic_topology(n_res, atoms_per_res);
-        let label = format!("{}atoms", top.n_atoms);
-
-        group.bench_with_input(BenchmarkId::new("exclusion_set", &label), &top, |b, top| {
-            b.iter(|| rst_mmpbsa::mm_energy::build_exclusion_set(black_box(top)));
-        });
-
-        group.bench_with_input(BenchmarkId::new("14_pairs", &label), &top, |b, top| {
-            b.iter(|| rst_mmpbsa::mm_energy::build_14_pairs(black_box(top)));
-        });
-    }
-    group.finish();
-}
-
-fn bench_pb_energy(c: &mut Criterion) {
-    let mut group = c.benchmark_group("pb_energy");
-    // PB is expensive — use small systems and limit sample size
-    group.sample_size(10);
-
-    for &(n_res, atoms_per_res) in &[(5, 5), (10, 10)] {
-        let top = build_synthetic_topology(n_res, atoms_per_res);
-        let coords = build_synthetic_coords(top.n_atoms);
-        let label = format!("{}atoms", top.n_atoms);
-
-        let params = PbParams {
-            grid_spacing: 0.5,
-            grid_buffer: 10.0,
-            tolerance: 1e-6,
-            max_iterations: 10000,
-            ..PbParams::default()
-        };
-
-        group.bench_with_input(
-            BenchmarkId::new("multigrid", &label),
-            &(&top, &coords, &params),
-            |b, &(top, coords, params)| {
-                b.iter(|| compute_pb_energy(black_box(top), black_box(coords), params));
             },
         );
     }
@@ -409,7 +533,7 @@ fn bench_binding_single_frame_pb(c: &mut Criterion) {
     };
 
     group.bench_with_input(
-        BenchmarkId::new("full_pipeline", &label),
+        BenchmarkId::new("pb_pipeline", &label),
         &(&top, &coords, &config),
         |b, &(top, coords, config)| {
             b.iter(|| {
@@ -425,6 +549,160 @@ fn bench_binding_single_frame_pb(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Per-Residue Decomposition Benchmarks
+// ============================================================================
+
+fn bench_decomposition(c: &mut Criterion) {
+    let mut group = c.benchmark_group("decomposition");
+    group.sample_size(20);
+
+    for &(n_receptor_res, n_ligand_res, atoms_per_res) in &[(15, 5, 8), (30, 10, 8)] {
+        let total_res = n_receptor_res + n_ligand_res;
+        let top = build_synthetic_topology(total_res, atoms_per_res);
+        let coords = build_synthetic_coords(top.n_atoms);
+        let label = format!("{}atoms_{}res", top.n_atoms, n_receptor_res + n_ligand_res);
+
+        let receptor_residues: Vec<usize> = (0..n_receptor_res).collect();
+        let ligand_residues: Vec<usize> = (n_receptor_res..total_res).collect();
+        let gb_params = GbParams::default();
+        let sa_params = SaParams::default();
+
+        group.throughput(Throughput::Elements(total_res as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("per_residue", &label),
+            &(
+                &top,
+                &coords,
+                &receptor_residues,
+                &ligand_residues,
+                &gb_params,
+                &sa_params,
+            ),
+            |b, &(top, coords, rec, lig, gb, sa)| {
+                b.iter(|| {
+                    decompose_binding_energy(
+                        black_box(top),
+                        black_box(coords),
+                        black_box(rec),
+                        black_box(lig),
+                        gb,
+                        sa,
+                    )
+                    .unwrap()
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// ============================================================================
+// Entropy Estimation Benchmarks
+// ============================================================================
+
+fn bench_entropy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("entropy");
+
+    for n_frames in [100, 500, 1000, 5000] {
+        let frames = build_synthetic_frame_energies(n_frames);
+        let label = format!("{}frames", n_frames);
+
+        group.throughput(Throughput::Elements(n_frames as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("interaction_entropy", &label),
+            &frames,
+            |b, frames| {
+                b.iter(|| interaction_entropy(black_box(frames), black_box(298.15)));
+            },
+        );
+    }
+    group.finish();
+}
+
+// ============================================================================
+// NB Set Construction Benchmarks
+// ============================================================================
+
+fn bench_nb_set_construction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("nb_set_construction");
+
+    for &(n_res, atoms_per_res) in SYSTEM_SIZES.iter().take(3) {
+        let top = build_synthetic_topology(n_res, atoms_per_res);
+        let label = format!("{}atoms", top.n_atoms);
+
+        group.bench_with_input(BenchmarkId::new("exclusion_set", &label), &top, |b, top| {
+            b.iter(|| rst_mmpbsa::mm_energy::build_exclusion_set(black_box(top)));
+        });
+
+        group.bench_with_input(BenchmarkId::new("14_pairs", &label), &top, |b, top| {
+            b.iter(|| rst_mmpbsa::mm_energy::build_14_pairs(black_box(top)));
+        });
+    }
+    group.finish();
+}
+
+// ============================================================================
+// Scaling Analysis Benchmarks
+// ============================================================================
+
+/// Benchmark to analyze scaling behavior across system sizes.
+fn bench_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scaling_analysis");
+    group.sample_size(20);
+
+    // Test GB energy scaling (expected O(n^2))
+    for n_atoms in [50, 100, 200, 400, 800] {
+        let n_res = n_atoms / 10;
+        let atoms_per_res = 10;
+        let top = build_synthetic_topology(n_res, atoms_per_res);
+        let coords = build_synthetic_coords(top.n_atoms);
+        let gb_params = GbParams::default();
+
+        group.throughput(Throughput::Elements(top.n_atoms as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("gb_scaling", n_atoms),
+            &(&top, &coords, &gb_params),
+            |b, &(top, coords, params)| {
+                b.iter(|| {
+                    rst_mmpbsa::gb_energy::compute_gb_energy(
+                        black_box(top),
+                        black_box(coords),
+                        params,
+                    )
+                });
+            },
+        );
+    }
+
+    // Test MM energy scaling
+    for n_atoms in [50, 100, 200, 400, 800] {
+        let n_res = n_atoms / 10;
+        let atoms_per_res = 10;
+        let top = build_synthetic_topology(n_res, atoms_per_res);
+        let coords = build_synthetic_coords(top.n_atoms);
+        let (excluded, pairs_14) = build_nb_sets(&top);
+
+        group.throughput(Throughput::Elements(top.n_atoms as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("mm_scaling", n_atoms),
+            &(&top, &coords, &excluded, &pairs_14),
+            |b, &(top, coords, excl, p14)| {
+                b.iter(|| compute_mm_energy_with_nb(black_box(top), black_box(coords), excl, p14));
+            },
+        );
+    }
+    group.finish();
+}
+
+// ============================================================================
+// Criterion Configuration
+// ============================================================================
+
 criterion_group!(
     benches,
     bench_mm_energy,
@@ -434,5 +712,8 @@ criterion_group!(
     bench_nb_set_construction,
     bench_pb_energy,
     bench_binding_single_frame_pb,
+    bench_decomposition,
+    bench_entropy,
+    bench_scaling,
 );
 criterion_main!(benches);

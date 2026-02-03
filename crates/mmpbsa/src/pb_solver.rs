@@ -365,9 +365,9 @@ fn compute_residual(
 /// Coarse grid has dims roughly half the fine grid.
 fn restrict(fine: &[f64], fine_dims: &[usize; 3]) -> (Vec<f64>, [usize; 3]) {
     let coarse_dims = [
-        (fine_dims[0] + 1) / 2,
-        (fine_dims[1] + 1) / 2,
-        (fine_dims[2] + 1) / 2,
+        fine_dims[0].div_ceil(2),
+        fine_dims[1].div_ceil(2),
+        fine_dims[2].div_ceil(2),
     ];
     let cnx = coarse_dims[0];
     let cny = coarse_dims[1];

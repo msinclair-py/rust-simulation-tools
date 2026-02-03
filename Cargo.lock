@@ -586,6 +586,7 @@ dependencies = [
 name = "rst-core"
 version = "0.2.1"
 dependencies = [
+ "criterion",
  "nalgebra",
  "ndarray",
  "rayon",

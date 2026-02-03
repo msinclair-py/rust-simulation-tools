@@ -14,7 +14,7 @@ impl PairBitmap {
     /// Create a new empty bitmap for `n_atoms` atoms.
     pub fn new(n_atoms: usize) -> Self {
         let n_bits = n_atoms * (n_atoms - 1) / 2;
-        let n_words = (n_bits + 63) / 64;
+        let n_words = n_bits.div_ceil(64);
         Self {
             data: vec![0u64; n_words],
             _n_atoms: n_atoms,

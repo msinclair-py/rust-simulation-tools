@@ -1,6 +1,7 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::useless_conversion)]
 #![allow(clippy::too_many_arguments)]
+#![allow(clippy::wrong_self_convention)]
 
 use ndarray::{Array2, Array3};
 use numpy::{
@@ -147,7 +148,7 @@ fn unwrap_system_py<'py>(
         .map(|i| [box_arr[[i, 0]], box_arr[[i, 1]], box_arr[[i, 2]]])
         .collect();
 
-    let unwrapped = unwrap_system(&traj_vec, &box_vec).map_err(|e| PyValueError::new_err(e))?;
+    let unwrapped = unwrap_system(&traj_vec, &box_vec).map_err(PyValueError::new_err)?;
 
     let result_f64 = trajectory_to_array3(&unwrapped).to_pyarray_bound(py);
 
@@ -859,7 +860,7 @@ impl PyAmberTopology {
         let selection = self
             .inner
             .build_selection(&residue_indices)
-            .map_err(|e| PyValueError::new_err(e))?;
+            .map_err(PyValueError::new_err)?;
 
         let dict = PyDict::new_bound(py);
         let atom_indices: Vec<i64> = selection.atom_indices.iter().map(|&x| x as i64).collect();
@@ -886,7 +887,7 @@ impl PyAmberTopology {
         let indices = self
             .inner
             .get_atom_indices_for_residues(&residue_indices)
-            .map_err(|e| PyValueError::new_err(e))?;
+            .map_err(PyValueError::new_err)?;
         let i64_indices: Vec<i64> = indices.iter().map(|&x| x as i64).collect();
         Ok(PyArray1::from_vec_bound(py, i64_indices))
     }
@@ -956,20 +957,20 @@ impl PyAmberTopology {
     fn get_bonds_for_residue(&self, residue_idx: usize) -> PyResult<Vec<(usize, usize)>> {
         self.inner
             .get_bonds_for_residue(residue_idx)
-            .map_err(|e| PyValueError::new_err(e))
+            .map_err(PyValueError::new_err)
     }
 
     fn get_bonds_for_residues(&self, residue_indices: Vec<usize>) -> PyResult<Vec<(usize, usize)>> {
         self.inner
             .get_bonds_for_residues(&residue_indices)
-            .map_err(|e| PyValueError::new_err(e))
+            .map_err(PyValueError::new_err)
     }
 }
 
 #[pyfunction]
 #[pyo3(name = "read_prmtop")]
 fn read_prmtop_py(path: &str) -> PyResult<PyAmberTopology> {
-    let inner = parse_prmtop(path).map_err(|e| PyIOError::new_err(e))?;
+    let inner = parse_prmtop(path).map_err(PyIOError::new_err)?;
     Ok(PyAmberTopology { inner })
 }
 
@@ -983,7 +984,7 @@ fn read_inpcrd_py<'py>(
     py: Python<'py>,
     path: &str,
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Option<Vec<f64>>)> {
-    let coords = parse_inpcrd(path).map_err(|e| PyIOError::new_err(e))?;
+    let coords = parse_inpcrd(path).map_err(PyIOError::new_err)?;
 
     let n_atoms = coords.positions.len();
     let mut coord_array = Array2::<f64>::zeros((n_atoms, 3));
@@ -1011,7 +1012,7 @@ struct PyDcdReader {
 impl PyDcdReader {
     #[new]
     fn new(path: &str) -> PyResult<Self> {
-        let reader = DcdReader::open(path).map_err(|e| PyIOError::new_err(e))?;
+        let reader = DcdReader::open(path).map_err(PyIOError::new_err)?;
         Ok(PyDcdReader { reader })
     }
 
@@ -1036,9 +1037,7 @@ impl PyDcdReader {
     }
 
     fn seek(&mut self, frame: usize) -> PyResult<()> {
-        self.reader
-            .seek_frame(frame)
-            .map_err(|e| PyIOError::new_err(e))
+        self.reader.seek_frame(frame).map_err(PyIOError::new_err)
     }
 
     fn read_frame<'py>(
@@ -1077,10 +1076,8 @@ impl PyDcdReader {
         &mut self,
         py: Python<'py>,
     ) -> PyResult<(Bound<'py, PyArray3<f64>>, Option<Bound<'py, PyArray2<f64>>>)> {
-        let (all_positions, all_boxes) = self
-            .reader
-            .read_all_frames()
-            .map_err(|e| PyIOError::new_err(e))?;
+        let (all_positions, all_boxes) =
+            self.reader.read_all_frames().map_err(PyIOError::new_err)?;
 
         if all_positions.is_empty() {
             return Err(PyValueError::new_err("No frames to read"));
@@ -1121,7 +1118,7 @@ impl PyDcdReader {
 #[pyfunction]
 #[pyo3(name = "read_dcd_header")]
 fn read_dcd_header_py<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyDict>> {
-    let header = read_dcd_header(path).map_err(|e| PyIOError::new_err(e))?;
+    let header = read_dcd_header(path).map_err(PyIOError::new_err)?;
 
     let dict = PyDict::new_bound(py);
     dict.set_item("n_frames", header.n_frames)?;
@@ -1197,7 +1194,7 @@ impl PyFingerprintSession {
         let selection = self
             .topology
             .build_selection(&residue_indices)
-            .map_err(|e| PyValueError::new_err(e))?;
+            .map_err(PyValueError::new_err)?;
         self.target_residues = residue_indices;
         self.target_selection = Some(selection);
         Ok(())
@@ -1221,7 +1218,7 @@ impl PyFingerprintSession {
         let indices = self
             .topology
             .get_atom_indices_for_residues(&residue_indices)
-            .map_err(|e| PyValueError::new_err(e))?;
+            .map_err(PyValueError::new_err)?;
         self.binder_residues = residue_indices;
         self.binder_atom_indices = indices;
         Ok(())
@@ -1248,7 +1245,7 @@ impl PyFingerprintSession {
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("No DCD file loaded"))?;
 
-        let frame_data = reader.read_frame().map_err(|e| PyIOError::new_err(e))?;
+        let frame_data = reader.read_frame().map_err(PyIOError::new_err)?;
 
         let (positions, _box_info) = match frame_data {
             Some(data) => data,
@@ -1288,7 +1285,7 @@ impl PyFingerprintSession {
                 let binder_selection = self
                     .topology
                     .build_selection(&self.binder_residues)
-                    .map_err(|e| PyValueError::new_err(e))?;
+                    .map_err(PyValueError::new_err)?;
                 let n_residues = binder_selection.residue_offsets.len() - 1;
                 let mut residues = Vec::with_capacity(n_residues);
                 for r in 0..n_residues {
@@ -1377,7 +1374,7 @@ impl PyFingerprintSession {
             .dcd_reader
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("No DCD trajectory loaded"))?;
-        reader.seek_frame(frame).map_err(|e| PyIOError::new_err(e))
+        reader.seek_frame(frame).map_err(PyIOError::new_err)
     }
 
     #[getter]
@@ -2009,8 +2006,7 @@ struct PyMdcrdReader {
 impl PyMdcrdReader {
     #[new]
     fn new(path: &str, n_atoms: usize, has_box: bool) -> PyResult<Self> {
-        let reader =
-            MdcrdReader::open(path, n_atoms, has_box).map_err(|e| PyIOError::new_err(e))?;
+        let reader = MdcrdReader::open(path, n_atoms, has_box).map_err(PyIOError::new_err)?;
         Ok(PyMdcrdReader { reader })
     }
 
@@ -2120,7 +2116,7 @@ fn compute_binding_energy_py(
     let topo = if let Ok(t) = topology.extract::<PyRef<PyAmberTopology>>() {
         t.inner.clone()
     } else if let Ok(path) = topology.extract::<&str>() {
-        parse_prmtop(path).map_err(|e| PyIOError::new_err(e))?
+        parse_prmtop(path).map_err(PyIOError::new_err)?
     } else {
         return Err(PyValueError::new_err(
             "topology must be an AmberTopology object or a path string",
@@ -2142,7 +2138,7 @@ fn compute_binding_energy_py(
     };
     let inner =
         binding::compute_binding_energy(&topo, std::path::Path::new(trajectory_path), &config)
-            .map_err(|e| PyValueError::new_err(e))?;
+            .map_err(PyValueError::new_err)?;
     Ok(PyBindingResult { inner })
 }
 
@@ -2170,7 +2166,7 @@ fn compute_binding_energy_single_frame_py(
         end_frame: 0,
     };
     let inner = binding::compute_binding_energy_single_frame(&topology.inner, &coords_vec, &config)
-        .map_err(|e| PyValueError::new_err(e))?;
+        .map_err(PyValueError::new_err)?;
     Ok(PyFrameEnergy { inner })
 }
 
@@ -2196,7 +2192,7 @@ fn decompose_binding_energy_py(
         &gb,
         &sa,
     )
-    .map_err(|e| PyValueError::new_err(e))?;
+    .map_err(PyValueError::new_err)?;
     Ok(PyDecompositionResult { inner })
 }
 
@@ -2253,7 +2249,7 @@ fn compute_pb_energy_py(
         &params,
         solute_residues.as_deref(),
     )
-    .map_err(|e| PyValueError::new_err(e))?;
+    .map_err(PyValueError::new_err)?;
     Ok(PyPbEnergy { inner })
 }
 

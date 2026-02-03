@@ -1,175 +1,84 @@
-"""Interaction fingerprint example - compute per-residue LJ and electrostatic energies.
+"""Interaction fingerprints: per-residue LJ and electrostatic energies.
 
-This example demonstrates two approaches:
-1. The new simplified FingerprintSession API (recommended)
-2. The original low-level compute_fingerprints API (for backward compatibility)
+Computes pairwise interaction energies between target and binder residues
+across a trajectory using the FingerprintSession API.
 """
 
 import numpy as np
+from rust_simulation_tools import FingerprintSession, FingerprintMode
 
+# -----------------------------------------------------------------------------
+# Setup session
+# -----------------------------------------------------------------------------
 
-def example_fingerprint_session():
-    """New simplified API using FingerprintSession.
+session = FingerprintSession("system.prmtop", "trajectory.dcd")
 
-    Reduces Python boilerplate from 25+ lines to ~5 lines while supporting
-    both target and binder fingerprinting modes.
-    """
-    from rust_simulation_tools import FingerprintSession, FingerprintMode
+# Define target (e.g., ligand) and binder (e.g., protein) residues
+n_target = 10
+session.set_target_residues(range(n_target))
+session.set_binder_residues(range(n_target, session.n_residues))
 
-    # Create session - topology params extracted automatically
-    session = FingerprintSession("system.prmtop", "trajectory.dcd")
+print(f"System: {session.n_residues} residues, {session.n_frames} frames")
+print(f"Target: residues 0-{n_target - 1}")
+print(f"Binder: residues {n_target}-{session.n_residues - 1}")
 
-    # Define selections
-    n_target = 10
-    session.set_target_residues(range(n_target))  # Residues 0-9
-    session.set_binder_residues(range(n_target, session.n_residues))  # Rest
+# -----------------------------------------------------------------------------
+# Compute target fingerprints
+# -----------------------------------------------------------------------------
 
-    print(f"Computing fingerprints for {n_target} target residues")
-    print(f"Interacting with {session.n_residues - n_target} binder residues")
-    print(f"Processing {session.n_frames} frames\n")
+session.return_residue_names = True
 
-    # -------------------------------------------------------------------------
-    # Fingerprint target residues (default mode)
-    # Return residue names alongside energies for labeling
-    # -------------------------------------------------------------------------
-    print("=== Target Fingerprints ===")
-    session.return_residue_names = True
+lj_fingerprints = []
+es_fingerprints = []
+residue_names = None
 
-    target_lj_fps = []
-    target_es_fps = []
-    target_resnames = None
+for lj_fp, es_fp, names in session:
+    lj_fingerprints.append(lj_fp)
+    es_fingerprints.append(es_fp)
+    if residue_names is None:
+        residue_names = list(names)
 
-    for lj_fp, es_fp, resnames in session:
-        target_lj_fps.append(lj_fp)
-        target_es_fps.append(es_fp)
-        if target_resnames is None:
-            target_resnames = list(resnames)
+lj_fingerprints = np.array(lj_fingerprints)
+es_fingerprints = np.array(es_fingerprints)
 
-    target_lj_fps = np.array(target_lj_fps)
-    target_es_fps = np.array(target_es_fps)
+print(f"\nFingerprint shape: {lj_fingerprints.shape} (frames x residues)")
 
-    print(f"Per-residue mean LJ energies (kJ/mol):")
-    for i, name in enumerate(target_resnames):
-        print(f"  {name}: {np.mean(target_lj_fps[:, i]):.2f}")
+# Per-residue mean energies
+print(f"\nPer-residue mean energies (kJ/mol):")
+print(f"  {'Residue':<8} {'LJ':>10} {'Elec':>10}")
+for i, name in enumerate(residue_names):
+    lj_mean = np.mean(lj_fingerprints[:, i])
+    es_mean = np.mean(es_fingerprints[:, i])
+    print(f"  {name:<8} {lj_mean:>10.2f} {es_mean:>10.2f}")
 
-    print(f"\nPer-residue mean ES energies (kJ/mol):")
-    for i, name in enumerate(target_resnames):
-        print(f"  {name}: {np.mean(target_es_fps[:, i]):.2f}")
+# Total interaction energy (last frame)
+total_lj = np.sum(lj_fingerprints[-1])
+total_es = np.sum(es_fingerprints[-1])
+print(f"\nTotal interaction (last frame): LJ={total_lj:.2f}, ES={total_es:.2f} kJ/mol")
 
-    print(f"\nTotal target interaction energy: "
-          f"LJ={np.sum(target_lj_fps[-1]):.2f}, "
-          f"ES={np.sum(target_es_fps[-1]):.2f} kJ/mol")
+# -----------------------------------------------------------------------------
+# Switch to binder fingerprints
+# -----------------------------------------------------------------------------
 
-    # -------------------------------------------------------------------------
-    # Fingerprint binder residues (switch mode)
-    # -------------------------------------------------------------------------
-    print("\n=== Binder Fingerprints ===")
-    session.set_fingerprint_mode(FingerprintMode.Binder)
-    session.seek(0)  # Reset to first frame
+session.set_fingerprint_mode(FingerprintMode.Binder)
+session.seek(0)
 
-    binder_lj_fps = []
-    binder_es_fps = []
-    binder_resnames = None
+binder_lj = []
+binder_es = []
 
-    for lj_fp, es_fp, resnames in session:
-        binder_lj_fps.append(lj_fp)
-        binder_es_fps.append(es_fp)
-        if binder_resnames is None:
-            binder_resnames = list(resnames)
+for lj_fp, es_fp, _ in session:
+    binder_lj.append(lj_fp)
+    binder_es.append(es_fp)
 
-    binder_lj_fps = np.array(binder_lj_fps)
-    binder_es_fps = np.array(binder_es_fps)
+binder_lj = np.array(binder_lj)
+binder_es = np.array(binder_es)
 
-    print(f"Binder residue count: {len(binder_resnames)}")
-    print(f"First 5 binder residues:")
-    for i, name in enumerate(binder_resnames[:5]):
-        print(f"  {name}: LJ={np.mean(binder_lj_fps[:, i]):.2f}, "
-              f"ES={np.mean(binder_es_fps[:, i]):.2f}")
+print(f"\nBinder fingerprints: {binder_lj.shape[1]} residues")
 
-    print(f"\nTotal binder interaction energy: "
-          f"LJ={np.sum(binder_lj_fps[-1]):.2f}, "
-          f"ES={np.sum(binder_es_fps[-1]):.2f} kJ/mol")
-
-    # Energy symmetry: sum(target) should equal sum(binder)
-    print("\n=== Energy Symmetry Check ===")
-    target_total = np.sum(target_lj_fps[-1]) + np.sum(target_es_fps[-1])
-    binder_total = np.sum(binder_lj_fps[-1]) + np.sum(binder_es_fps[-1])
-    print(f"Target total: {target_total:.2f} kJ/mol")
-    print(f"Binder total: {binder_total:.2f} kJ/mol")
-    print(f"Difference: {abs(target_total - binder_total):.6f} kJ/mol")
-
-
-def example_low_level_api():
-    """Original low-level API using compute_fingerprints directly.
-
-    This approach provides more control but requires more boilerplate.
-    """
-    from rust_simulation_tools import compute_fingerprints, read_prmtop, DcdReader
-
-    # Load AMBER topology for force field parameters
-    topo = read_prmtop("system.prmtop")
-
-    # Get charges and LJ parameters
-    charges = np.array(topo.charges())
-    sigmas = np.array(topo.sigmas())
-    epsilons = np.array(topo.epsilons())
-
-    # Build residue map (atom indices grouped by residue)
-    resmap_indices, resmap_offsets = topo.build_resmap()
-    resmap_indices = np.array(resmap_indices, dtype=np.int64)
-    resmap_offsets = np.array(resmap_offsets, dtype=np.int64)
-
-    # Define target residues (e.g., first 10 residues of protein)
-    n_target = 10
-    target_resmap_indices = resmap_indices[:resmap_offsets[n_target]]
-    target_resmap_offsets = resmap_offsets[:n_target + 1]
-
-    # Define binder atoms (all atoms after target residues)
-    binder_indices = np.arange(resmap_offsets[n_target], topo.n_atoms, dtype=np.int64)
-
-    # Load trajectory
-    reader = DcdReader("trajectory.dcd")
-    print(f"Computing fingerprints for {n_target} residues over {reader.n_frames} frames")
-
-    # Compute fingerprints for each frame
-    lj_fingerprints = []
-    es_fingerprints = []
-
-    while True:
-        frame = reader.read_frame()
-        if frame is None:
-            break
-        positions, _ = frame
-
-        lj_fp, es_fp = compute_fingerprints(
-            positions, charges, sigmas, epsilons,
-            target_resmap_indices, target_resmap_offsets, binder_indices
-        )
-        lj_fingerprints.append(lj_fp)
-        es_fingerprints.append(es_fp)
-
-    lj_fingerprints = np.array(lj_fingerprints)
-    es_fingerprints = np.array(es_fingerprints)
-
-    # Summarize results
-    print(f"\nPer-residue mean LJ energies (kJ/mol):")
-    for i in range(n_target):
-        resname = topo.residue_labels[i]
-        print(f"  {resname}: {np.mean(lj_fingerprints[:, i]):.2f}")
-
-    print(f"\nPer-residue mean ES energies (kJ/mol):")
-    for i in range(n_target):
-        resname = topo.residue_labels[i]
-        print(f"  {resname}: {np.mean(es_fingerprints[:, i]):.2f}")
-
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1 and sys.argv[1] == "--low-level":
-        print("Running low-level API example\n")
-        example_low_level_api()
-    else:
-        print("Running FingerprintSession example (recommended)\n")
-        print("Use --low-level flag for original API\n")
-        example_fingerprint_session()
+# Energy conservation check: sum(target) should equal sum(binder)
+target_total = total_lj + total_es
+binder_total = np.sum(binder_lj[-1]) + np.sum(binder_es[-1])
+print(f"Energy symmetry check:")
+print(f"  Target total: {target_total:.2f} kJ/mol")
+print(f"  Binder total: {binder_total:.2f} kJ/mol")
+print(f"  Difference: {abs(target_total - binder_total):.6f} kJ/mol")

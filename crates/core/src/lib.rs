@@ -4,6 +4,10 @@
 //! Provides AMBER file parsers, trajectory readers, SASA calculations,
 //! alignment, unwrapping, and fingerprinting engines.
 
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::module_inception)]
+#![allow(clippy::type_complexity)]
+
 pub mod amber;
 pub mod fingerprint;
 pub mod kabsch;
