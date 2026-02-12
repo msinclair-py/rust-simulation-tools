@@ -10,12 +10,15 @@ use crate::pb_grid::{DielectricMaps, PbGrid};
 use rayon::prelude::*;
 
 /// Boundary condition for the PB solve.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum BoundaryCondition {
     /// phi = 0 on all boundaries.
     Zero,
     /// Debye-Huckel single-sphere approximation on boundaries.
     DebyeHuckel,
+    /// Interpolated from a coarse grid solution (for focusing).
+    /// Contains the precomputed boundary values for each boundary grid point.
+    Interpolated(Vec<f64>),
 }
 
 /// Set Debye-Huckel boundary conditions on the grid.
@@ -60,6 +63,59 @@ fn set_dh_boundary(
                 }
                 let idx = grid.index(ix, iy, iz);
                 potential[idx] = phi;
+            }
+        }
+    }
+}
+
+/// Compute interpolated boundary conditions from a coarse grid solution.
+///
+/// For each boundary point of `fine_grid`, looks up the corresponding
+/// position in the coarse solution via trilinear interpolation.
+pub fn interpolated_boundary(
+    fine_grid: &PbGrid,
+    coarse_grid: &PbGrid,
+    coarse_potential: &[f64],
+) -> Vec<f64> {
+    let nx = fine_grid.dims[0];
+    let ny = fine_grid.dims[1];
+    let nz = fine_grid.dims[2];
+    let n = nx * ny * nz;
+    let mut boundary = vec![0.0f64; n];
+
+    for iz in 0..nz {
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let is_boundary =
+                    ix == 0 || ix == nx - 1 || iy == 0 || iy == ny - 1 || iz == 0 || iz == nz - 1;
+                if !is_boundary {
+                    continue;
+                }
+                let pt = fine_grid.point(ix, iy, iz);
+                let idx = fine_grid.index(ix, iy, iz);
+                boundary[idx] = coarse_grid.interpolate_with_data(&pt, coarse_potential);
+            }
+        }
+    }
+    boundary
+}
+
+/// Set boundary conditions from precomputed interpolated values.
+fn set_interpolated_boundary(potential: &mut [f64], grid: &PbGrid, boundary: &[f64]) {
+    let nx = grid.dims[0];
+    let ny = grid.dims[1];
+    let nz = grid.dims[2];
+
+    for iz in 0..nz {
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let is_boundary =
+                    ix == 0 || ix == nx - 1 || iy == 0 || iy == ny - 1 || iz == 0 || iz == nz - 1;
+                if !is_boundary {
+                    continue;
+                }
+                let idx = grid.index(ix, iy, iz);
+                potential[idx] = boundary[idx];
             }
         }
     }
@@ -264,10 +320,13 @@ pub fn solve_lpbe(
     let mut potential = vec![0.0f64; n];
 
     // Set boundary conditions
-    match boundary {
+    match &boundary {
         BoundaryCondition::Zero => {}
         BoundaryCondition::DebyeHuckel => {
             set_dh_boundary(&mut potential, grid, coords, charges, kappa_bulk, eps_out);
+        }
+        BoundaryCondition::Interpolated(bvals) => {
+            set_interpolated_boundary(&mut potential, grid, bvals);
         }
     }
 
@@ -703,10 +762,13 @@ pub fn solve_lpbe_multigrid(
     let mut potential = vec![0.0f64; n];
 
     // Set boundary conditions
-    match boundary {
+    match &boundary {
         BoundaryCondition::Zero => {}
         BoundaryCondition::DebyeHuckel => {
             set_dh_boundary(&mut potential, grid, coords, charges, kappa_bulk, eps_out);
+        }
+        BoundaryCondition::Interpolated(bvals) => {
+            set_interpolated_boundary(&mut potential, grid, bvals);
         }
     }
 

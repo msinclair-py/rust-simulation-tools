@@ -7,8 +7,12 @@ use rayon;
 
 use crate::pb_grid::{
     assign_dielectrics, assign_kappa, auto_grid, map_charges, topology_charges, topology_radii,
+    PbGrid,
 };
-use crate::pb_solver::{compute_elec_energy, solve_lpbe_multigrid, BoundaryCondition};
+use crate::pb_solver::{
+    compute_elec_energy, interpolated_boundary, solve_lpbe_multigrid, BoundaryCondition,
+    PbSolveResult,
+};
 use crate::subsystem::{extract_coords, extract_subtopology};
 use rst_core::amber::prmtop::AmberTopology;
 
@@ -35,6 +39,11 @@ pub struct PbParams {
     pub tolerance: f64,
     /// Maximum SOR iterations. Default: 10000.
     pub max_iterations: usize,
+    /// Ratio of coarse grid extent to molecule extent for focusing. Default: 4.0.
+    /// Set to 0.0 to disable focusing (not recommended for large molecules).
+    pub fillratio: f64,
+    /// Ratio of coarse grid spacing to fine grid spacing. Default: 8.
+    pub fscale: usize,
 }
 
 impl Default for PbParams {
@@ -50,6 +59,8 @@ impl Default for PbParams {
             ion_radius: 2.0,
             tolerance: 1e-6,
             max_iterations: 10000,
+            fillratio: 4.0,
+            fscale: 8,
         }
     }
 }
@@ -74,13 +85,191 @@ pub(crate) fn compute_kappa(salt_conc: f64, solvent_dielectric: f64, temperature
     (factor * salt_conc / (solvent_dielectric * kb * temperature)).sqrt()
 }
 
+/// Build a coarse grid for focusing.
+///
+/// The coarse grid covers `fillratio` × the molecule extent, with spacing
+/// equal to `fscale` × the fine grid spacing.
+fn build_coarse_grid(
+    coords: &[[f64; 3]],
+    fine_spacing: f64,
+    fillratio: f64,
+    fscale: usize,
+) -> PbGrid {
+    let mut min = [f64::MAX; 3];
+    let mut max = [f64::MIN; 3];
+    for c in coords {
+        for d in 0..3 {
+            if c[d] < min[d] {
+                min[d] = c[d];
+            }
+            if c[d] > max[d] {
+                max[d] = c[d];
+            }
+        }
+    }
+
+    let coarse_spacing = fine_spacing * fscale as f64;
+    let mut dims = [0usize; 3];
+    let mut origin = [0.0f64; 3];
+    for d in 0..3 {
+        let mol_extent = max[d] - min[d];
+        let grid_extent = mol_extent * fillratio;
+        let n = (grid_extent / coarse_spacing).ceil() as usize + 1;
+        dims[d] = if n % 2 == 0 { n + 1 } else { n };
+        let actual_extent = (dims[d] - 1) as f64 * coarse_spacing;
+        let center = 0.5 * (min[d] + max[d]);
+        origin[d] = center - 0.5 * actual_extent;
+    }
+
+    PbGrid::new(dims, [coarse_spacing; 3], origin)
+}
+
+/// Perform a single PB solve (solvated or reference) with optional focusing.
+///
+/// If `coarse_grid` is provided, first solves on the coarse grid, then
+/// interpolates boundary conditions for the fine grid.
+fn pb_solve_with_focusing(
+    fine_grid: &PbGrid,
+    coarse_grid: Option<&PbGrid>,
+    coords: &[[f64; 3]],
+    charges: &[f64],
+    radii: &[f64],
+    params: &PbParams,
+    eps_in: f64,
+    eps_out: f64,
+    kappa: f64,
+    use_ionic: bool,
+) -> (PbSolveResult, f64) {
+    // Determine DH BC parameters for the initial (or only) solve
+    let bc_kappa = if use_ionic { kappa } else { 0.0 };
+
+    match coarse_grid {
+        Some(cgrid) => {
+            // === Two-level focusing ===
+            // 1. Solve on coarse grid with DH/Coulomb BCs
+            let coarse_charges = map_charges(cgrid, coords, charges);
+            let coarse_diel =
+                assign_dielectrics(cgrid, coords, radii, params.probe_radius, eps_in, eps_out);
+            let coarse_kappa = if use_ionic {
+                assign_kappa(
+                    cgrid,
+                    coords,
+                    radii,
+                    params.ion_radius,
+                    kappa,
+                    params.solvent_dielectric,
+                )
+            } else {
+                vec![0.0; cgrid.len()]
+            };
+
+            let coarse_result = solve_lpbe_multigrid(
+                cgrid,
+                &coarse_charges,
+                &coarse_diel,
+                &coarse_kappa,
+                BoundaryCondition::DebyeHuckel,
+                coords,
+                charges,
+                bc_kappa,
+                eps_out,
+                params.tolerance * 10.0, // coarser tolerance for speed
+                params.max_iterations,
+            );
+
+            // 2. Interpolate coarse solution as BCs for fine grid
+            let fine_bc = interpolated_boundary(fine_grid, cgrid, &coarse_result.potential);
+
+            // 3. Solve on fine grid with interpolated BCs
+            let fine_charges = map_charges(fine_grid, coords, charges);
+            let fine_diel = assign_dielectrics(
+                fine_grid,
+                coords,
+                radii,
+                params.probe_radius,
+                eps_in,
+                eps_out,
+            );
+            let fine_kappa = if use_ionic {
+                assign_kappa(
+                    fine_grid,
+                    coords,
+                    radii,
+                    params.ion_radius,
+                    kappa,
+                    params.solvent_dielectric,
+                )
+            } else {
+                vec![0.0; fine_grid.len()]
+            };
+
+            let result = solve_lpbe_multigrid(
+                fine_grid,
+                &fine_charges,
+                &fine_diel,
+                &fine_kappa,
+                BoundaryCondition::Interpolated(fine_bc),
+                coords,
+                charges,
+                bc_kappa,
+                eps_out,
+                params.tolerance,
+                params.max_iterations,
+            );
+            let energy = compute_elec_energy(fine_grid, &result.potential, coords, charges);
+            (result, energy)
+        }
+        None => {
+            // === Single-level solve ===
+            let charge_map = map_charges(fine_grid, coords, charges);
+            let diel = assign_dielectrics(
+                fine_grid,
+                coords,
+                radii,
+                params.probe_radius,
+                eps_in,
+                eps_out,
+            );
+            let kappa_map = if use_ionic {
+                assign_kappa(
+                    fine_grid,
+                    coords,
+                    radii,
+                    params.ion_radius,
+                    kappa,
+                    params.solvent_dielectric,
+                )
+            } else {
+                vec![0.0; fine_grid.len()]
+            };
+
+            let result = solve_lpbe_multigrid(
+                fine_grid,
+                &charge_map,
+                &diel,
+                &kappa_map,
+                BoundaryCondition::DebyeHuckel,
+                coords,
+                charges,
+                bc_kappa,
+                eps_out,
+                params.tolerance,
+                params.max_iterations,
+            );
+            let energy = compute_elec_energy(fine_grid, &result.potential, coords, charges);
+            (result, energy)
+        }
+    }
+}
+
 /// Compute PB polar solvation energy for a molecular system.
 ///
-/// Performs two solves:
-/// 1. Solvated: ε_in inside molecule, ε_out outside, with ionic strength
-/// 2. Reference: ε_in everywhere (vacuum), no ionic strength
+/// Uses two-level focusing (when `fillratio > 0`):
+/// 1. Coarse solve on a large grid with DH/Coulomb boundary conditions
+/// 2. Fine solve with boundary conditions interpolated from the coarse solution
 ///
-/// Returns ΔG_PB = E_solvated - E_reference (reaction field energy).
+/// Performs paired solves (solvated + reference) and returns
+/// ΔG_PB = E_solvated - E_reference (reaction field energy).
 pub fn compute_pb_energy(
     topology: &AmberTopology,
     coords: &[[f64; 3]],
@@ -95,77 +284,60 @@ pub fn compute_pb_energy(
         params.temperature,
     );
 
-    // Build grid
-    let grid = auto_grid(coords, params.grid_spacing, params.grid_buffer);
-    log::info!(
-        "PB grid: {}x{}x{} ({} points) for {} atoms",
-        grid.dims[0],
-        grid.dims[1],
-        grid.dims[2],
-        grid.len(),
-        coords.len()
-    );
+    // Build fine grid (centered on molecule with buffer)
+    let fine_grid = auto_grid(coords, params.grid_spacing, params.grid_buffer);
 
-    // Map charges onto grid
-    let charge_map = map_charges(&grid, coords, &charges);
+    // Build coarse grid for focusing (if enabled)
+    let coarse_grid = if params.fillratio > 0.0 && params.fscale > 1 {
+        let cg = build_coarse_grid(coords, params.grid_spacing, params.fillratio, params.fscale);
+        log::info!(
+            "PB focusing: coarse {}x{}x{} (spacing {:.1}), fine {}x{}x{} (spacing {:.1}) for {} atoms",
+            cg.dims[0], cg.dims[1], cg.dims[2], cg.spacing[0],
+            fine_grid.dims[0], fine_grid.dims[1], fine_grid.dims[2], fine_grid.spacing[0],
+            coords.len()
+        );
+        Some(cg)
+    } else {
+        log::info!(
+            "PB grid: {}x{}x{} ({} points) for {} atoms",
+            fine_grid.dims[0],
+            fine_grid.dims[1],
+            fine_grid.dims[2],
+            fine_grid.len(),
+            coords.len()
+        );
+        None
+    };
 
     // Run solvated and reference solves in parallel
     let ((result_solv, e_solv), (result_ref, e_ref)) = rayon::join(
         || {
-            // === Solvated solve ===
-            let diel_solv = assign_dielectrics(
-                &grid,
-                coords,
-                &radii,
-                params.probe_radius,
-                params.solute_dielectric,
-                params.solvent_dielectric,
-            );
-            let kappa_sq_solv = assign_kappa(&grid, coords, &radii, params.ion_radius, kappa);
-
-            let result = solve_lpbe_multigrid(
-                &grid,
-                &charge_map,
-                &diel_solv,
-                &kappa_sq_solv,
-                BoundaryCondition::DebyeHuckel,
+            pb_solve_with_focusing(
+                &fine_grid,
+                coarse_grid.as_ref(),
                 coords,
                 &charges,
-                kappa,
+                &radii,
+                params,
+                params.solute_dielectric,
                 params.solvent_dielectric,
-                params.tolerance,
-                params.max_iterations,
-            );
-            let energy = compute_elec_energy(&grid, &result.potential, coords, &charges);
-            (result, energy)
+                kappa,
+                true, // use ionic strength
+            )
         },
         || {
-            // === Reference (vacuum) solve ===
-            let diel_ref = assign_dielectrics(
-                &grid,
-                coords,
-                &radii,
-                params.probe_radius,
-                params.solute_dielectric,
-                params.solute_dielectric,
-            );
-            let kappa_sq_ref = vec![0.0; grid.len()];
-
-            let result = solve_lpbe_multigrid(
-                &grid,
-                &charge_map,
-                &diel_ref,
-                &kappa_sq_ref,
-                BoundaryCondition::Zero,
+            pb_solve_with_focusing(
+                &fine_grid,
+                coarse_grid.as_ref(),
                 coords,
                 &charges,
-                0.0,
+                &radii,
+                params,
                 params.solute_dielectric,
-                params.tolerance,
-                params.max_iterations,
-            );
-            let energy = compute_elec_energy(&grid, &result.potential, coords, &charges);
-            (result, energy)
+                params.solute_dielectric, // uniform ε_in for reference
+                kappa,
+                false, // no ionic strength
+            )
         },
     );
 
@@ -186,11 +358,13 @@ pub fn compute_pb_energy(
     }
 
     log::debug!(
-        "PB energies: E_solv = {:.6} (iters={}), E_ref = {:.6} (iters={}), delta = {:.6}",
+        "PB energies: E_solv = {:.4} (iters={}, res={:.2e}), E_ref = {:.4} (iters={}, res={:.2e}), delta = {:.4}",
         e_solv,
         result_solv.iterations,
+        result_solv.final_residual,
         e_ref,
         result_ref.iterations,
+        result_ref.final_residual,
         e_solv - e_ref
     );
 

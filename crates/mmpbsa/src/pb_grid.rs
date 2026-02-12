@@ -6,6 +6,7 @@
 
 use rayon::prelude::*;
 use rst_core::amber::prmtop::AmberTopology;
+use std::collections::VecDeque;
 
 /// A regular 3D grid for finite-difference PB calculations.
 #[derive(Debug, Clone)]
@@ -317,11 +318,273 @@ fn point_inside_molecule(
     false
 }
 
-/// Assign face-centered dielectric values based on molecular surface.
+/// Compute Solvent-Excluded Surface (SES) inside/outside classification.
 ///
-/// Uses a simple approach: for each grid edge, test both endpoints.
-/// If both are inside the molecule → eps_in, both outside → eps_out,
-/// mixed → harmonic mean.
+/// The SES (molecular surface) is the boundary between regions accessible
+/// to a probe sphere of the given radius and regions that are not. This is
+/// tighter than the SAS (Solvent-Accessible Surface) because crevices and
+/// grooves between atoms are classified as interior even though they are
+/// outside the union of inflated spheres.
+///
+/// Algorithm:
+/// 1. Identify valid probe-center positions: grid points outside the SAS
+///    (where a probe sphere wouldn't overlap any atom) connected to the
+///    bulk (grid boundary) via a path of such positions.
+/// 2. A grid point is outside the SES if any valid probe center within
+///    `probe_radius` can reach it; otherwise it is inside.
+fn compute_inside_ses(
+    grid: &PbGrid,
+    coords: &[[f64; 3]],
+    radii: &[f64],
+    probe_radius: f64,
+) -> Vec<bool> {
+    let nx = grid.dims[0];
+    let ny = grid.dims[1];
+    let nz = grid.dims[2];
+    let n = nx * ny * nz;
+
+    if probe_radius <= 0.0 {
+        // No probe: SES = VDW surface
+        return (0..n)
+            .into_par_iter()
+            .map(|idx| {
+                let iz = idx / (nx * ny);
+                let iy = (idx % (nx * ny)) / nx;
+                let ix = idx % nx;
+                let pt = grid.point(ix, iy, iz);
+                point_inside_molecule(&pt, coords, radii, 0.0)
+            })
+            .collect();
+    }
+
+    // Step 1: Compute inside_sas (SAS = union of spheres with r + probe).
+    // Outside SAS = valid probe-center positions (probe fits without overlap).
+    let inside_sas: Vec<bool> = (0..n)
+        .into_par_iter()
+        .map(|idx| {
+            let iz = idx / (nx * ny);
+            let iy = (idx % (nx * ny)) / nx;
+            let ix = idx % nx;
+            let pt = grid.point(ix, iy, iz);
+            point_inside_molecule(&pt, coords, radii, probe_radius)
+        })
+        .collect();
+
+    // Step 2: Flood-fill from boundary through outside_sas to find the
+    // connected exterior (probe centers reachable from the bulk).
+    let mut connected_exterior = vec![false; n];
+    let mut queue = VecDeque::new();
+
+    // Seed: boundary points that are outside SAS
+    for iz in 0..nz {
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let is_boundary =
+                    ix == 0 || ix == nx - 1 || iy == 0 || iy == ny - 1 || iz == 0 || iz == nz - 1;
+                if is_boundary {
+                    let idx = grid.index(ix, iy, iz);
+                    if !inside_sas[idx] {
+                        connected_exterior[idx] = true;
+                        queue.push_back(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    // BFS through outside_sas
+    while let Some(idx) = queue.pop_front() {
+        let iz = idx / (nx * ny);
+        let iy = (idx % (nx * ny)) / nx;
+        let ix = idx % nx;
+
+        let neighbors: [Option<usize>; 6] = [
+            if ix > 0 {
+                Some(grid.index(ix - 1, iy, iz))
+            } else {
+                None
+            },
+            if ix + 1 < nx {
+                Some(grid.index(ix + 1, iy, iz))
+            } else {
+                None
+            },
+            if iy > 0 {
+                Some(grid.index(ix, iy - 1, iz))
+            } else {
+                None
+            },
+            if iy + 1 < ny {
+                Some(grid.index(ix, iy + 1, iz))
+            } else {
+                None
+            },
+            if iz > 0 {
+                Some(grid.index(ix, iy, iz - 1))
+            } else {
+                None
+            },
+            if iz + 1 < nz {
+                Some(grid.index(ix, iy, iz + 1))
+            } else {
+                None
+            },
+        ];
+
+        for ni in neighbors.into_iter().flatten() {
+            if !connected_exterior[ni] && !inside_sas[ni] {
+                connected_exterior[ni] = true;
+                queue.push_back(ni);
+            }
+        }
+    }
+
+    // Step 3: Dilate connected exterior by probe_radius.
+    // A point is outside SES if any connected_exterior point is within probe_radius.
+    let probe_sq = probe_radius * probe_radius;
+    let rx = (probe_radius / grid.spacing[0]).ceil() as isize;
+    let ry = (probe_radius / grid.spacing[1]).ceil() as isize;
+    let rz = (probe_radius / grid.spacing[2]).ceil() as isize;
+
+    (0..n)
+        .into_par_iter()
+        .map(|idx| {
+            let iz = (idx / (nx * ny)) as isize;
+            let iy = ((idx % (nx * ny)) / nx) as isize;
+            let ix = (idx % nx) as isize;
+            let pt = grid.point(ix as usize, iy as usize, iz as usize);
+
+            for dz in -rz..=rz {
+                let jz = iz + dz;
+                if jz < 0 || jz >= nz as isize {
+                    continue;
+                }
+                for dy in -ry..=ry {
+                    let jy = iy + dy;
+                    if jy < 0 || jy >= ny as isize {
+                        continue;
+                    }
+                    for dx in -rx..=rx {
+                        let jx = ix + dx;
+                        if jx < 0 || jx >= nx as isize {
+                            continue;
+                        }
+
+                        let jidx = grid.index(jx as usize, jy as usize, jz as usize);
+                        if connected_exterior[jidx] {
+                            let neighbor_pt = grid.point(jx as usize, jy as usize, jz as usize);
+                            let ddx = pt[0] - neighbor_pt[0];
+                            let ddy = pt[1] - neighbor_pt[1];
+                            let ddz = pt[2] - neighbor_pt[2];
+                            if ddx * ddx + ddy * ddy + ddz * ddz <= probe_sq {
+                                return false; // Probe can reach -> outside SES
+                            }
+                        }
+                    }
+                }
+            }
+            true // No probe can reach -> inside SES
+        })
+        .collect()
+}
+
+/// Compute the fraction of an axis-aligned edge segment that lies inside the
+/// molecular surface (union of atom spheres inflated by probe radius).
+///
+/// The edge runs from `lo` to `hi` along `axis` (0=x, 1=y, 2=z), at fixed
+/// perpendicular coordinates `perp1` and `perp2`.
+///
+/// Returns a value in [0, 1].
+fn fraction_inside_along_axis(
+    lo: f64,
+    hi: f64,
+    perp1: f64,
+    perp2: f64,
+    axis: usize,
+    coords: &[[f64; 3]],
+    radii: &[f64],
+    probe_radius: f64,
+) -> f64 {
+    let edge_len = hi - lo;
+    if edge_len <= 0.0 {
+        return 0.0;
+    }
+
+    // Perpendicular axis indices
+    let (a1, a2) = match axis {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+
+    // Collect intervals along the edge that lie inside each atom's sphere
+    let mut intervals: Vec<(f64, f64)> = Vec::new();
+
+    for (c, &r) in coords.iter().zip(radii.iter()) {
+        let big_r = r + probe_radius;
+        let d1 = perp1 - c[a1];
+        let d2 = perp2 - c[a2];
+        let rho_sq = big_r * big_r - d1 * d1 - d2 * d2;
+        if rho_sq <= 0.0 {
+            continue;
+        }
+        let rho = rho_sq.sqrt();
+        let ilo = (c[axis] - rho).max(lo);
+        let ihi = (c[axis] + rho).min(hi);
+        if ilo < ihi {
+            intervals.push((ilo, ihi));
+        }
+    }
+
+    if intervals.is_empty() {
+        return 0.0;
+    }
+
+    // Sort by interval start
+    intervals.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+    // Merge overlapping intervals and sum total inside length
+    let mut total = 0.0;
+    let mut cur_lo = intervals[0].0;
+    let mut cur_hi = intervals[0].1;
+    for &(ilo, ihi) in &intervals[1..] {
+        if ilo <= cur_hi {
+            cur_hi = cur_hi.max(ihi);
+        } else {
+            total += cur_hi - cur_lo;
+            cur_lo = ilo;
+            cur_hi = ihi;
+        }
+    }
+    total += cur_hi - cur_lo;
+
+    (total / edge_len).clamp(0.0, 1.0)
+}
+
+/// Weighted harmonic mean of dielectrics.
+///
+/// `1/ε = f/ε_in + (1-f)/ε_out` where `f` is the fraction inside.
+/// This is the standard approach used by AMBER and other PB solvers
+/// for face-centered dielectrics at boundary edges.
+#[inline]
+fn weighted_harmonic_eps(f: f64, eps_in: f64, eps_out: f64) -> f64 {
+    if f <= 0.0 {
+        return eps_out;
+    }
+    if f >= 1.0 {
+        return eps_in;
+    }
+    1.0 / (f / eps_in + (1.0 - f) / eps_out)
+}
+
+/// Assign face-centered dielectric values based on the Solvent-Excluded Surface.
+///
+/// Uses the SES (molecular surface) to classify grid points as inside or
+/// outside, then assigns edge dielectrics:
+/// - Both endpoints inside → ε_in
+/// - Both endpoints outside → ε_out
+/// - Mixed → weighted harmonic mean using the fraction of the edge inside
+///   the molecular surface (computed analytically from sphere geometry).
 pub fn assign_dielectrics(
     grid: &PbGrid,
     coords: &[[f64; 3]],
@@ -335,25 +598,10 @@ pub fn assign_dielectrics(
     let nz = grid.dims[2];
     let n = nx * ny * nz;
 
-    // First, compute per-node inside/outside flag
-    let inside: Vec<bool> = (0..n)
-        .into_par_iter()
-        .map(|idx| {
-            let iz = idx / (nx * ny);
-            let iy = (idx % (nx * ny)) / nx;
-            let ix = idx % nx;
-            let pt = grid.point(ix, iy, iz);
-            point_inside_molecule(&pt, coords, radii, probe_radius)
-        })
-        .collect();
-
-    let eps_for = |a: bool, b: bool| -> f64 {
-        match (a, b) {
-            (true, true) => eps_in,
-            (false, false) => eps_out,
-            _ => 2.0 * eps_in * eps_out / (eps_in + eps_out), // harmonic mean
-        }
-    };
+    // Use the Solvent-Excluded Surface for inside/outside classification.
+    // This handles re-entrant regions correctly, unlike the simpler SAS
+    // (union of inflated spheres) which over-estimates the cavity size.
+    let inside = compute_inside_ses(grid, coords, radii, probe_radius);
 
     let mut eps_x = vec![eps_out; n];
     let mut eps_y = vec![eps_out; n];
@@ -364,14 +612,70 @@ pub fn assign_dielectrics(
             for ix in 0..nx {
                 let idx = grid.index(ix, iy, iz);
                 let a = inside[idx];
+
+                // X-edge: (ix,iy,iz) → (ix+1,iy,iz)
                 if ix + 1 < nx {
-                    eps_x[idx] = eps_for(a, inside[grid.index(ix + 1, iy, iz)]);
+                    let b = inside[grid.index(ix + 1, iy, iz)];
+                    if a == b {
+                        eps_x[idx] = if a { eps_in } else { eps_out };
+                    } else {
+                        // Use VDW sphere geometry (probe=0) for the fraction
+                        // since the SES contact surface is at the VDW boundary.
+                        let pt = grid.point(ix, iy, iz);
+                        let f = fraction_inside_along_axis(
+                            pt[0],
+                            pt[0] + grid.spacing[0],
+                            pt[1],
+                            pt[2],
+                            0,
+                            coords,
+                            radii,
+                            0.0, // VDW radii, no probe inflation
+                        );
+                        eps_x[idx] = weighted_harmonic_eps(f, eps_in, eps_out);
+                    }
                 }
+
+                // Y-edge: (ix,iy,iz) → (ix,iy+1,iz)
                 if iy + 1 < ny {
-                    eps_y[idx] = eps_for(a, inside[grid.index(ix, iy + 1, iz)]);
+                    let b = inside[grid.index(ix, iy + 1, iz)];
+                    if a == b {
+                        eps_y[idx] = if a { eps_in } else { eps_out };
+                    } else {
+                        let pt = grid.point(ix, iy, iz);
+                        let f = fraction_inside_along_axis(
+                            pt[1],
+                            pt[1] + grid.spacing[1],
+                            pt[0],
+                            pt[2],
+                            1,
+                            coords,
+                            radii,
+                            0.0,
+                        );
+                        eps_y[idx] = weighted_harmonic_eps(f, eps_in, eps_out);
+                    }
                 }
+
+                // Z-edge: (ix,iy,iz) → (ix,iy,iz+1)
                 if iz + 1 < nz {
-                    eps_z[idx] = eps_for(a, inside[grid.index(ix, iy, iz + 1)]);
+                    let b = inside[grid.index(ix, iy, iz + 1)];
+                    if a == b {
+                        eps_z[idx] = if a { eps_in } else { eps_out };
+                    } else {
+                        let pt = grid.point(ix, iy, iz);
+                        let f = fraction_inside_along_axis(
+                            pt[2],
+                            pt[2] + grid.spacing[2],
+                            pt[0],
+                            pt[1],
+                            2,
+                            coords,
+                            radii,
+                            0.0,
+                        );
+                        eps_z[idx] = weighted_harmonic_eps(f, eps_in, eps_out);
+                    }
                 }
             }
         }
@@ -385,7 +689,13 @@ pub fn assign_dielectrics(
     }
 }
 
-/// Assign κ² map: zero inside ion-exclusion surface, κ²_bulk outside.
+/// Assign κ̄² map: zero inside ion-exclusion surface, ε_s·κ² outside.
+///
+/// The linearized PBE is: ∇·[ε∇φ] - κ̄²φ = -4π·ec·ρ
+/// where κ̄² = ε_s · κ² (the Debye-Hückel κ² multiplied by the solvent
+/// dielectric). The factor of ε_s arises because the mobile ion charge
+/// density is -2c₀·φ/(kBT) (no ε_s), while κ² = 8π·ec·c₀·N_A/(ε_s·kBT)
+/// already has 1/ε_s from the Debye-Hückel derivation.
 ///
 /// The ion-exclusion surface is the molecular surface inflated by the ion radius.
 pub fn assign_kappa(
@@ -394,12 +704,14 @@ pub fn assign_kappa(
     radii: &[f64],
     ion_radius: f64,
     kappa_bulk: f64,
+    solvent_dielectric: f64,
 ) -> Vec<f64> {
     let nx = grid.dims[0];
     let ny = grid.dims[1];
     let nz = grid.dims[2];
     let n = nx * ny * nz;
-    let kappa_sq = kappa_bulk * kappa_bulk;
+    // κ̄² = ε_s · κ² is the coefficient in the linearized PBE
+    let kappa_bar_sq = solvent_dielectric * kappa_bulk * kappa_bulk;
 
     (0..n)
         .into_par_iter()
@@ -412,7 +724,7 @@ pub fn assign_kappa(
             if point_inside_molecule(&pt, coords, radii, ion_radius) {
                 0.0
             } else {
-                kappa_sq
+                kappa_bar_sq
             }
         })
         .collect()

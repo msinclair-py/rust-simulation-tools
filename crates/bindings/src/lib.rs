@@ -1539,7 +1539,7 @@ struct PyPbParams {
 #[pymethods]
 impl PyPbParams {
     #[new]
-    #[pyo3(signature = (grid_spacing=None, grid_buffer=None, solute_dielectric=None, solvent_dielectric=None, salt_concentration=None, temperature=None, probe_radius=None, ion_radius=None, tolerance=None, max_iterations=None))]
+    #[pyo3(signature = (grid_spacing=None, grid_buffer=None, solute_dielectric=None, solvent_dielectric=None, salt_concentration=None, temperature=None, probe_radius=None, ion_radius=None, tolerance=None, max_iterations=None, fillratio=None, fscale=None))]
     fn new(
         grid_spacing: Option<f64>,
         grid_buffer: Option<f64>,
@@ -1551,6 +1551,8 @@ impl PyPbParams {
         ion_radius: Option<f64>,
         tolerance: Option<f64>,
         max_iterations: Option<usize>,
+        fillratio: Option<f64>,
+        fscale: Option<usize>,
     ) -> Self {
         let mut params = PbParams::default();
         if let Some(v) = grid_spacing {
@@ -1582,6 +1584,12 @@ impl PyPbParams {
         }
         if let Some(v) = max_iterations {
             params.max_iterations = v;
+        }
+        if let Some(v) = fillratio {
+            params.fillratio = v;
+        }
+        if let Some(v) = fscale {
+            params.fscale = v;
         }
         PyPbParams { inner: params }
     }

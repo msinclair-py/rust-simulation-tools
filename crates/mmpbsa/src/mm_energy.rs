@@ -201,13 +201,14 @@ pub fn compute_mm_energy_with_nb(
         energy.angle += ka * (theta - theta_eq) * (theta - theta_eq);
     }
 
-    // Dihedral energy: E = (V_n/2) * [1 + cos(n*phi - gamma)]
+    // Dihedral energy: E = pk * [1 + cos(n*phi - gamma)]
+    // AMBER prmtop DIHEDRAL_FORCE_CONSTANT stores pk (already Vn/2, the half-barrier height)
     for &(i, j, k, l, type_idx, _ignore_14) in &topology.dihedrals {
-        let vn = topology.dihedral_force_constants[type_idx];
+        let pk = topology.dihedral_force_constants[type_idx];
         let n = topology.dihedral_periodicities[type_idx];
         let gamma = topology.dihedral_phases[type_idx];
         let phi = compute_dihedral(&coords[i], &coords[j], &coords[k], &coords[l]);
-        energy.dihedral += (vn / 2.0) * (1.0 + (n * phi - gamma).cos());
+        energy.dihedral += pk * (1.0 + (n * phi - gamma).cos());
     }
 
     // Non-bonded interactions (parallelized over outer atom index)
@@ -380,7 +381,8 @@ mod tests {
         top.lj_acoef = Arc::new(vec![0.0]);
         top.lj_bcoef = Arc::new(vec![0.0]);
 
-        // Trans dihedral (phi=PI): E = (2/2) * [1 + cos(2*PI - PI)] = 1 * [1 + cos(PI)] = 0
+        // Trans dihedral (phi=PI): E = 2 * [1 + cos(2*PI - PI)] = 2 * [1 + cos(PI)] = 0
+        // (pk=2.0 is already the half-barrier height in AMBER prmtop convention)
         let coords = [
             [1.0, 1.0, 0.0],
             [0.0, 0.0, 0.0],

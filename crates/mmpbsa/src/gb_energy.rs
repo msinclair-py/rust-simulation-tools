@@ -241,7 +241,7 @@ fn compute_born_radii(
             let psi2 = psi_rho * psi_rho;
             let psi3 = psi2 * psi_rho;
             let tanh_val = (alpha * psi_rho - beta * psi2 + gamma * psi3).tanh();
-            let inv_r = 1.0 / rho_i - tanh_val / rho_i;
+            let inv_r = 1.0 / rho_i - tanh_val / topology.radii[i];
             born_radii[i] = if inv_r > 0.0 {
                 1.0 / inv_r
             } else {
@@ -267,10 +267,14 @@ fn compute_born_radii(
 /// # Returns
 /// `GbEnergy` containing the total energy in kcal/mol and per-atom Born radii.
 ///
-/// The GB energy is computed as:
-///   E_GB = -½(1/ε_in - 1/ε_out) Σ_{i,j} q_i·q_j·exp(-κ·f_GB) / f_GB
+/// The GB energy is computed using the AMBER convention:
+///   E_GB = -½ Σ_{i,j} q_i·q_j · (1/ε_in - exp(-KSCALE·κ·f_GB)/ε_out) / f_GB
 ///
 /// where f_GB = sqrt(r²_ij + R_i·R_j·exp(-r²_ij/(4·R_i·R_j)))
+/// and KSCALE = 0.73 (Srinivasan et al.)
+///
+/// When salt_concentration = 0 (κ = 0), this reduces to:
+///   E_GB = -½(1/ε_in - 1/ε_out) Σ_{i,j} q_i·q_j / f_GB
 ///
 /// Charges are taken from `charges_amber` (AMBER internal units where
 /// q_amber = q_real × 18.2223, so q_i·q_j already yields kcal·Å/mol when
@@ -283,23 +287,34 @@ fn compute_gb_energy_from_radii(
     born_radii: &[f64],
 ) -> f64 {
     let n = topology.n_atoms;
-    let dielectric_factor =
-        -0.5 * (1.0 / params.solute_dielectric - 1.0 / params.solvent_dielectric);
     let kappa = compute_kappa(
         params.salt_concentration,
         params.solvent_dielectric,
         params.temperature,
     );
     let cutoff_sq = params.cutoff * params.cutoff;
+    let inv_ein = 1.0 / params.solute_dielectric;
+    let inv_eout = 1.0 / params.solvent_dielectric;
+
+    // AMBER Debye-Hückel scaling factor (Srinivasan et al.)
+    const KSCALE: f64 = 0.73;
+
+    // Dielectric factor depends on whether salt screening is active:
+    //   With salt:    E = -0.5 * q_i*q_j * (1/ε_in - exp(-KSCALE*κ*f)/ε_out) / f
+    //   Without salt: E = -0.5 * q_i*q_j * (1/ε_in - 1/ε_out) / f
+    let no_salt = kappa <= 0.0;
+    let dielectric_no_salt = -0.5 * (inv_ein - inv_eout);
 
     // Self-energy terms (O(N), kept serial)
     let mut energy = 0.0;
     for i in 0..n {
         let qi = topology.charges_amber[i];
-        let mut self_energy = dielectric_factor * qi * qi / born_radii[i];
-        if kappa > 0.0 {
-            self_energy *= (-kappa * born_radii[i]).exp();
-        }
+        let self_energy = if no_salt {
+            dielectric_no_salt * qi * qi / born_radii[i]
+        } else {
+            -0.5 * qi * qi * (inv_ein - (-KSCALE * kappa * born_radii[i]).exp() * inv_eout)
+                / born_radii[i]
+        };
         energy += self_energy;
     }
 
@@ -324,10 +339,11 @@ fn compute_gb_energy_from_radii(
                 let ri_rj = born_radii[i] * born_radii[j];
                 let f_gb = (r2 + ri_rj * (-r2 / (4.0 * ri_rj)).exp()).sqrt();
 
-                let mut pair_energy = dielectric_factor * qi * qj / f_gb;
-                if kappa > 0.0 {
-                    pair_energy *= (-kappa * f_gb).exp();
-                }
+                let pair_energy = if no_salt {
+                    dielectric_no_salt * qi * qj / f_gb
+                } else {
+                    -0.5 * qi * qj * (inv_ein - (-KSCALE * kappa * f_gb).exp() * inv_eout) / f_gb
+                };
 
                 sum += 2.0 * pair_energy;
             }
