@@ -31,8 +31,9 @@ from rust_simulation_tools import (
 # Can be either a solvated or dry topology - solvent is automatically stripped
 # based on the receptor/ligand residue selection. For solvated systems, the
 # trajectory should match the topology (i.e., include solvent coordinates).
-topo = read_prmtop("complex.prmtop")
-coords, _ = read_inpcrd("complex.inpcrd")
+topo = read_prmtop("../data/mmpbsa.prmtop")
+coords, _ = read_inpcrd("../data/mmpbsa.inpcrd")
+dcd = "../data/mmpbsa.dcd"
 
 print(f"System: {topo.n_atoms} atoms, {topo.n_residues} residues")
 
@@ -64,7 +65,7 @@ print("\n=== MM-GBSA Binding Energy ===")
 
 gb_result = compute_binding_energy(
     topo,
-    trajectory_path="trajectory.dcd",
+    trajectory_path=dcd,
     receptor_residues=receptor_residues,
     ligand_residues=ligand_residues,
     gb_params=GbParams(model=GbModel.ObcII, salt_concentration=0.15),
@@ -95,7 +96,7 @@ pb_params = PbParams(
 
 pb_result = compute_binding_energy(
     topo,
-    trajectory_path="trajectory.dcd",
+    trajectory_path=dcd,
     receptor_residues=receptor_residues,
     ligand_residues=ligand_residues,
     pb_params=pb_params,
