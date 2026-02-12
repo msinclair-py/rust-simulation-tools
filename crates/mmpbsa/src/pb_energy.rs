@@ -115,7 +115,7 @@ fn build_coarse_grid(
         let mol_extent = max[d] - min[d];
         let grid_extent = mol_extent * fillratio;
         let n = (grid_extent / coarse_spacing).ceil() as usize + 1;
-        dims[d] = if n % 2 == 0 { n + 1 } else { n };
+        dims[d] = if n.is_multiple_of(2) { n + 1 } else { n };
         let actual_extent = (dims[d] - 1) as f64 * coarse_spacing;
         let center = 0.5 * (min[d] + max[d]);
         origin[d] = center - 0.5 * actual_extent;
