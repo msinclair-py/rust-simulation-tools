@@ -10,8 +10,15 @@
 
 pub mod amber;
 pub mod fingerprint;
+pub mod forcefield;
+pub mod graph;
 pub mod kabsch;
+pub mod mmcif;
+pub mod mol2;
+pub mod pdb;
+pub mod pdb_writer;
 pub mod sasa;
+pub mod sdf;
 pub mod selection;
 pub mod trajectory;
 pub mod util;

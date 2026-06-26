@@ -13,5 +13,10 @@ pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
 ndarray = "0.15"
 rst-mmpbsa = { path = "../mmpbsa" }
+rst-ipsae = { path = "../ipsae" }
+rst-tleap = { path = "../tleap" }
+rst-minimize = { path = "../minimize" }
+rst-am1 = { path = "../am1" }
+rst-antechamber = { path = "../antechamber" }
 rayon = "1.11.0"
 rustc-hash = "2.0"

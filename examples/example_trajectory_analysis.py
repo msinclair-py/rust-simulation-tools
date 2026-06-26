@@ -42,11 +42,13 @@ print(f"  Total: {sasa['total']:.1f} A^2")
 print(f"  Per-atom shape: {sasa['per_atom'].shape}")
 
 # Top 5 most exposed residues
-sorted_res = sorted(sasa['per_residue'].items(), key=lambda x: x[1], reverse=True)[:5]
+# per_residue is a numpy array ordered by residue index
+per_residue = sasa['per_residue']
+top_idx = np.argsort(per_residue)[::-1][:5]
 print(f"  Most exposed residues:")
-for res_idx, area in sorted_res:
+for res_idx in top_idx:
     res_label = topo.residue_labels[res_idx]
-    print(f"    {res_label} {res_idx + 1}: {area:.1f} A^2")
+    print(f"    {res_label} {res_idx + 1}: {per_residue[res_idx]:.1f} A^2")
 
 # Trajectory SASA
 traj_sasa = compute_sasa_trajectory_from_topology(topo, trajectory)

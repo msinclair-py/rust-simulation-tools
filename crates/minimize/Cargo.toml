@@ -1,0 +1,14 @@
+[package]
+name = "rst-minimize"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rst-core = { path = "../core" }
+rustfft = "6"
+rayon = "1.11.0"
+thiserror = "2"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

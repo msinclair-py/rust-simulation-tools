@@ -430,7 +430,7 @@ mod tests {
             rst_core::amber::prmtop::parse_prmtop(prmtop_path).expect("Failed to parse prmtop");
         let mut reader =
             MdcrdReader::open(mdcrd_path, top.n_atoms, false).expect("Failed to open mdcrd");
-        let coords = reader
+        let (coords, _box_dims) = reader
             .read_frame()
             .expect("Failed to read frame")
             .expect("No frames");

@@ -121,15 +121,19 @@ fn build_coarse_grid(
         origin[d] = center - 0.5 * actual_extent;
     }
 
-    PbGrid::new(dims, [coarse_spacing; 3], origin)
+    PbGrid::descriptor(dims, [coarse_spacing; 3], origin)
 }
 
 /// Perform a single PB solve (solvated or reference) with optional focusing.
 ///
 /// If `coarse_grid` is provided, first solves on the coarse grid, then
 /// interpolates boundary conditions for the fine grid.
+///
+/// `fine_charge_map` is the pre-computed charge map for the fine grid,
+/// shared between solvated and reference solves to avoid duplicate work.
 fn pb_solve_with_focusing(
     fine_grid: &PbGrid,
+    fine_charge_map: &[f64],
     coarse_grid: Option<&PbGrid>,
     coords: &[[f64; 3]],
     charges: &[f64],
@@ -177,11 +181,67 @@ fn pb_solve_with_focusing(
                 params.max_iterations,
             );
 
+            // Validate coarse solve before using for focusing BCs.
+            // If the coarse solve didn't converge, its potential may be garbage
+            // and would corrupt the fine-grid solve via interpolated BCs.
+            // Also check that the potential values are finite and reasonable.
+            let coarse_ok = coarse_result.converged && {
+                let max_pot = coarse_result
+                    .potential
+                    .iter()
+                    .fold(0.0f64, |mx, &v| mx.max(v.abs()));
+                max_pot.is_finite() && max_pot < 1e10
+            };
+
+            if !coarse_ok {
+                log::warn!(
+                    "Coarse focusing solve failed (converged={}, residual={:.2e}), falling back to non-focusing",
+                    coarse_result.converged,
+                    coarse_result.final_residual,
+                );
+                // Fall back to single-level solve with DH BCs on the fine grid
+                let fine_diel = assign_dielectrics(
+                    fine_grid,
+                    coords,
+                    radii,
+                    params.probe_radius,
+                    eps_in,
+                    eps_out,
+                );
+                let fine_kappa = if use_ionic {
+                    assign_kappa(
+                        fine_grid,
+                        coords,
+                        radii,
+                        params.ion_radius,
+                        kappa,
+                        params.solvent_dielectric,
+                    )
+                } else {
+                    vec![0.0; fine_grid.len()]
+                };
+
+                let result = solve_lpbe_multigrid(
+                    fine_grid,
+                    fine_charge_map,
+                    &fine_diel,
+                    &fine_kappa,
+                    BoundaryCondition::DebyeHuckel,
+                    coords,
+                    charges,
+                    bc_kappa,
+                    eps_out,
+                    params.tolerance,
+                    params.max_iterations,
+                );
+                let energy = compute_elec_energy(fine_grid, &result.potential, coords, charges);
+                return (result, energy);
+            }
+
             // 2. Interpolate coarse solution as BCs for fine grid
             let fine_bc = interpolated_boundary(fine_grid, cgrid, &coarse_result.potential);
 
             // 3. Solve on fine grid with interpolated BCs
-            let fine_charges = map_charges(fine_grid, coords, charges);
             let fine_diel = assign_dielectrics(
                 fine_grid,
                 coords,
@@ -205,7 +265,7 @@ fn pb_solve_with_focusing(
 
             let result = solve_lpbe_multigrid(
                 fine_grid,
-                &fine_charges,
+                fine_charge_map,
                 &fine_diel,
                 &fine_kappa,
                 BoundaryCondition::Interpolated(fine_bc),
@@ -221,7 +281,6 @@ fn pb_solve_with_focusing(
         }
         None => {
             // === Single-level solve ===
-            let charge_map = map_charges(fine_grid, coords, charges);
             let diel = assign_dielectrics(
                 fine_grid,
                 coords,
@@ -245,7 +304,7 @@ fn pb_solve_with_focusing(
 
             let result = solve_lpbe_multigrid(
                 fine_grid,
-                &charge_map,
+                fine_charge_map,
                 &diel,
                 &kappa_map,
                 BoundaryCondition::DebyeHuckel,
@@ -309,11 +368,15 @@ pub fn compute_pb_energy(
         None
     };
 
+    // Compute fine-grid charge map once and share between both solves
+    let fine_charge_map = map_charges(&fine_grid, coords, &charges);
+
     // Run solvated and reference solves in parallel
     let ((result_solv, e_solv), (result_ref, e_ref)) = rayon::join(
         || {
             pb_solve_with_focusing(
                 &fine_grid,
+                &fine_charge_map,
                 coarse_grid.as_ref(),
                 coords,
                 &charges,
@@ -328,6 +391,7 @@ pub fn compute_pb_energy(
         || {
             pb_solve_with_focusing(
                 &fine_grid,
+                &fine_charge_map,
                 coarse_grid.as_ref(),
                 coords,
                 &charges,

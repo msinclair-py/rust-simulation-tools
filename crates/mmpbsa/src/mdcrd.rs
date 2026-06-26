@@ -43,9 +43,10 @@ impl MdcrdReader {
 
     /// Read the next frame. Returns None at EOF.
     ///
-    /// Coordinates are returned in Angstroms as `Vec<[f64; 3]>`.
-    pub fn read_frame(&mut self) -> Result<Option<Vec<[f64; 3]>>, String> {
-        let n_values = self.n_atoms * 3 + if self.has_box { 6 } else { 0 };
+    /// Returns `(coordinates, box_dimensions)` where coordinates are in
+    /// Angstroms and box_dimensions (if present) are `[X, Y, Z]` in Angstroms.
+    pub fn read_frame(&mut self) -> Result<Option<(Vec<[f64; 3]>, Option<[f64; 3]>)>, String> {
+        let n_values = self.n_atoms * 3 + if self.has_box { 3 } else { 0 };
         let mut values = Vec::with_capacity(n_values);
         let mut line = String::new();
 
@@ -88,14 +89,22 @@ impl MdcrdReader {
             }
         }
 
-        // Convert flat values to [f64; 3] coordinates (skip box if present)
+        // Convert flat values to [f64; 3] coordinates
         let mut coords = Vec::with_capacity(self.n_atoms);
         for i in 0..self.n_atoms {
             coords.push([values[i * 3], values[i * 3 + 1], values[i * 3 + 2]]);
         }
 
+        // Extract box dimensions if present
+        let box_dims = if self.has_box {
+            let base = self.n_atoms * 3;
+            Some([values[base], values[base + 1], values[base + 2]])
+        } else {
+            None
+        };
+
         self.current_frame += 1;
-        Ok(Some(coords))
+        Ok(Some((coords, box_dims)))
     }
 
     pub fn current_frame(&self) -> usize {
@@ -125,8 +134,9 @@ mod tests {
         // Read first frame
         let frame = reader.read_frame().expect("Failed to read frame");
         assert!(frame.is_some(), "Should have at least one frame");
-        let coords = frame.unwrap();
+        let (coords, box_dims) = frame.unwrap();
         assert_eq!(coords.len(), top.n_atoms);
+        assert!(box_dims.is_none(), "Test file has no box");
 
         // First atom coords should match the file header
         assert!((coords[0][0] - 41.300).abs() < 0.001);

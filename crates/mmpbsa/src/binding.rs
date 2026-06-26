@@ -17,6 +17,7 @@ use crate::subsystem::{extract_coords, extract_subtopology};
 use rayon::prelude::*;
 use rst_core::amber::prmtop::AmberTopology;
 use rst_core::trajectory::dcd::DcdReader;
+use std::collections::VecDeque;
 use std::path::Path;
 
 /// Solvation method selection for polar solvation energy.
@@ -219,6 +220,106 @@ fn slice_frame_to_complex(
         Some(indices) => extract_coords(coords, indices),
         None => coords.to_vec(),
     }
+}
+
+/// Reimage complex coordinates to make all molecules contiguous.
+///
+/// When coordinates come from a periodic MD trajectory, atoms may be wrapped
+/// into the primary unit cell, splitting covalently bonded molecules across
+/// periodic boundaries. This function:
+/// 1. Walks the bond graph via BFS to unwrap each connected component
+///    (making each chain/molecule contiguous).
+/// 2. Translates all components to be near the first (largest) component
+///    using minimum image convention on geometric centers.
+fn reimage_complex(coords: &mut [[f64; 3]], bonds: &[(usize, usize)], box_dims: [f64; 3]) {
+    let n = coords.len();
+    if n == 0 {
+        return;
+    }
+
+    // Build adjacency list from bonds
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(a, b) in bonds {
+        if a < n && b < n {
+            adj[a].push(b);
+            adj[b].push(a);
+        }
+    }
+
+    // BFS to unwrap each connected component and collect membership
+    let mut visited = vec![false; n];
+    let mut components: Vec<Vec<usize>> = Vec::new();
+
+    for start in 0..n {
+        if visited[start] {
+            continue;
+        }
+
+        let mut component = Vec::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(start);
+        visited[start] = true;
+
+        while let Some(current) = queue.pop_front() {
+            component.push(current);
+            for &neighbor in &adj[current] {
+                if !visited[neighbor] {
+                    visited[neighbor] = true;
+                    // Unwrap neighbor relative to current atom using minimum image
+                    for d in 0..3 {
+                        let diff = coords[neighbor][d] - coords[current][d];
+                        if diff > box_dims[d] * 0.5 {
+                            coords[neighbor][d] -= box_dims[d];
+                        } else if diff < -box_dims[d] * 0.5 {
+                            coords[neighbor][d] += box_dims[d];
+                        }
+                    }
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+
+        components.push(component);
+    }
+
+    // Shift all components to be near the first component
+    if components.len() <= 1 {
+        return;
+    }
+
+    let ref_center = geometric_center(coords, &components[0]);
+    for comp in &components[1..] {
+        let comp_center = geometric_center(coords, comp);
+        let mut shift = [0.0; 3];
+        for d in 0..3 {
+            let diff = comp_center[d] - ref_center[d];
+            if diff > box_dims[d] * 0.5 {
+                shift[d] = -box_dims[d];
+            } else if diff < -box_dims[d] * 0.5 {
+                shift[d] = box_dims[d];
+            }
+        }
+        for &atom in comp {
+            for d in 0..3 {
+                coords[atom][d] += shift[d];
+            }
+        }
+    }
+}
+
+/// Compute the geometric center of a subset of atoms.
+fn geometric_center(coords: &[[f64; 3]], indices: &[usize]) -> [f64; 3] {
+    let n = indices.len() as f64;
+    let mut center = [0.0; 3];
+    for &i in indices {
+        for d in 0..3 {
+            center[d] += coords[i][d];
+        }
+    }
+    for d in 0..3 {
+        center[d] /= n;
+    }
+    center
 }
 
 /// Compute polar solvation energy for a subsystem using the selected method.
@@ -463,12 +564,19 @@ pub fn compute_binding_energy(
             let mut reader = MdcrdReader::open(trajectory_path, complex_top.n_atoms, *has_box)?;
             let mut frame_idx: usize = 0;
             let mut batch: Vec<Vec<[f64; 3]>> = Vec::with_capacity(BATCH_SIZE);
-            while let Some(coords) = reader.read_frame()? {
+            while let Some((coords, box_dims)) = reader.read_frame()? {
                 if frame_idx >= end_frame {
                     break;
                 }
                 if frame_idx >= start_frame && (frame_idx - start_frame).is_multiple_of(stride) {
-                    let coords = slice_frame_to_complex(&coords, &complex_atom_indices);
+                    let mut coords = slice_frame_to_complex(&coords, &complex_atom_indices);
+                    if let Some(box_dims) = box_dims {
+                        reimage_complex(
+                            &mut coords,
+                            &effective_complex_top.bonds,
+                            box_dims,
+                        );
+                    }
                     last_frame_coords = coords.clone();
                     batch.push(coords);
 
@@ -513,16 +621,31 @@ pub fn compute_binding_energy(
             let mut reader = DcdReader::open(trajectory_path)?;
             let mut frame_idx: usize = 0;
             let mut batch: Vec<Vec<[f64; 3]>> = Vec::with_capacity(BATCH_SIZE);
-            while let Some((coords_nm, _box_info)) = reader.read_frame()? {
+            while let Some((coords_nm, box_info)) = reader.read_frame()? {
                 if frame_idx >= end_frame {
                     break;
                 }
                 if frame_idx >= start_frame && (frame_idx - start_frame).is_multiple_of(stride) {
+                    // DCD coordinates are in nm, convert to Angstroms
                     let coords: Vec<[f64; 3]> = coords_nm
                         .iter()
                         .map(|c| [c[0] * 10.0, c[1] * 10.0, c[2] * 10.0])
                         .collect();
-                    let coords = slice_frame_to_complex(&coords, &complex_atom_indices);
+                    let mut coords = slice_frame_to_complex(&coords, &complex_atom_indices);
+                    // DCD box_info is [a, b, c, alpha, beta, gamma] in nm;
+                    // convert box lengths to Angstroms for reimaging
+                    if let Some(box_info) = box_info {
+                        let box_dims = [
+                            box_info[0] * 10.0,
+                            box_info[1] * 10.0,
+                            box_info[2] * 10.0,
+                        ];
+                        reimage_complex(
+                            &mut coords,
+                            &effective_complex_top.bonds,
+                            box_dims,
+                        );
+                    }
                     last_frame_coords = coords.clone();
                     batch.push(coords);
 
@@ -682,7 +805,7 @@ mod tests {
         // Read first frame
         let mut reader =
             MdcrdReader::open(mdcrd_path, top.n_atoms, false).expect("Failed to open mdcrd");
-        let coords = reader
+        let (coords, _box_dims) = reader
             .read_frame()
             .expect("Failed to read frame")
             .expect("No frames");
@@ -728,4 +851,5 @@ mod tests {
             result.delta_total, result.delta_mm, result.delta_polar, result.delta_sa
         );
     }
+
 }

@@ -26,11 +26,15 @@ maturin develop --release
 
 ## Features
 
-- **File I/O**: AMBER topology/coordinates, DCD and MDCRD trajectories
+- **File I/O**: AMBER topology/coordinates, DCD and MDCRD trajectories; PDB, mmCIF, mol2, SDF structures
+- **System building**: tleap-style `SystemBuilder` — force fields, solvation, ions, prmtop/inpcrd output
+- **Ligand parameterization**: built-in antechamber — GAFF2 atom typing + AM1-BCC charges (no AmberTools needed)
 - **Selections**: VMD-style atom selection with property access
 - **Analysis**: SASA, trajectory unwrapping, Kabsch alignment
 - **Fingerprints**: Per-residue interaction energies (LJ + electrostatic)
+- **Minimization**: Steepest-descent + conjugate-gradient with optional restraints
 - **MM-PBSA/GBSA**: Binding free energy with per-residue decomposition
+- **Interface scoring**: ipSAE, pDockQ, pDockQ2, LIS, ipTM for predicted complexes
 
 ## Quick Start
 
@@ -46,6 +50,58 @@ coords, box = read_inpcrd("system.inpcrd")
 # Load trajectory
 dcd = DcdReader("trajectory.dcd")
 trajectory, boxes = dcd.read_all()
+```
+
+### Build a System
+
+The `SystemBuilder` parameterizes structures and writes simulation-ready AMBER
+files — no AmberTools install required.
+
+```python
+from rust_simulation_tools import SystemBuilder
+
+builder = SystemBuilder()
+builder.load_protein_ff19sb()   # protein force field
+builder.load_gaff2()            # small-molecule force field
+builder.load_water_opc()        # OPC water model
+
+# Load structures (PDB / mmCIF for proteins, mol2/SDF for ligands)
+protein = builder.load_pdb("protein.pdb")
+ligand  = builder.load_ligand("ligand.sdf", net_charge=0)  # auto GAFF2 + AM1-BCC
+
+# Combine, solvate, ionize
+system = builder.combine([protein, ligand])
+builder.solvate_box(system, buffer=12.0)
+builder.add_salt(system, "Na+", "Cl-", concentration=0.150)  # neutralize + 150 mM
+
+# Write output
+builder.write_amber(system, "complex.prmtop", "complex.inpcrd")
+builder.write_pdb(system, "complex.pdb")
+```
+
+For implicit solvent, skip `load_water_opc`/solvation and write the topology
+directly. See `examples/example_explicit_solvent.py`,
+`example_implicit_solvent.py`, and `example_protein_ligand.py`.
+
+### Parameterize a Ligand
+
+```python
+import rust_simulation_tools as rst
+
+# Standalone: write a parameterized mol2 (GAFF2 types + charges)
+rst.parameterize_ligand(
+    "ligand.sdf", "ligand_gaff2.mol2",
+    net_charge=0,
+    charge_method="am1bcc",   # or "gasteiger" (faster, less accurate)
+)
+
+# Raw AM1 Mulliken charges from atomic numbers + coordinates
+import numpy as np
+charges = rst.compute_am1_charges(
+    np.array([8, 1, 1], dtype=np.int64),          # O, H, H
+    np.array([[0, 0, 0], [0, 0.757, 0.587], [0, -0.757, 0.587]], dtype=float),
+    charge=0,
+)
 ```
 
 ### Atom Selection
@@ -86,9 +142,12 @@ from rust_simulation_tools import compute_sasa_from_topology
 
 # Single frame
 sasa = compute_sasa_from_topology(topo, coords)
-print(f"Total SASA: {sasa['total']:.1f} A^2")
-print(f"Per-atom: {sasa['per_atom'].shape}")
-print(f"Per-residue: {sasa['per_residue']}")  # dict of residue_idx -> area
+print(f"Total SASA: {sasa['total']:.1f} A^2")          # float
+print(f"Per-atom: {sasa['per_atom'].shape}")           # ndarray (n_atoms,)
+print(f"Per-residue: {sasa['per_residue'].shape}")     # ndarray (n_residues,), by residue index
+
+# Trajectory: total -> ndarray (n_frames,), per_residue -> list of per-frame dicts
+traj_sasa = compute_sasa_trajectory_from_topology(topo, trajectory)
 ```
 
 ### Trajectory Alignment
@@ -176,6 +235,53 @@ for res in sorted(decomp.receptor_residues, key=lambda r: r.total())[:5]:
     print(f"{res.residue_label}{res.residue_index}: {res.total():.2f} kcal/mol")
 ```
 
+### Energy Minimization
+
+Steepest-descent + conjugate-gradient minimization with optional positional
+restraints and a full energy-component breakdown.
+
+```python
+from rust_simulation_tools import minimize, MinimizeConfig
+
+config = MinimizeConfig(
+    max_cycles=5000,
+    sd_cycles=100,           # initial steepest-descent steps
+    convergence_rms=0.01,
+    cutoff=10.0,
+    restraint_mask="backbone",  # optional; omit for unrestrained
+    restraint_weight=10.0,
+)
+
+result = minimize("system.prmtop", "system.inpcrd", config=config, output="min.inpcrd")
+print(f"Energy: {result.final_energy:.2f} kcal/mol  converged={result.converged}")
+
+ec = result.energy_components       # bond, angle, dihedral, vdw,
+print(ec.total(), ec.vdw, ec.elec_recip)   # elec_direct, elec_recip, vdw_14, elec_14
+```
+
+Use `minimize_topology(topo, "system.inpcrd", ...)` to reuse a pre-loaded
+topology. See `examples/example_minimization.py`.
+
+### Interface Scoring (ipSAE)
+
+Score predicted complexes (AlphaFold-Multimer, Boltz, Chai) from pLDDT and PAE.
+
+```python
+import numpy as np
+from rust_simulation_tools import compute_ipsae
+
+plddt = np.load("plddt.npy")            # per-residue, 0-100 scale, shape (N,)
+pae = np.load("pae.npy").flatten()      # predicted aligned error, flattened (N*N,)
+
+results = compute_ipsae("model.pdb", plddt, pae)   # PDB or CIF
+for pair in results["max_pairs"]:       # also "directed_pairs"
+    print(f"{pair['chain1']}-{pair['chain2']}: "
+          f"ipSAE={pair['ipSAE']:.3f} pDockQ={pair['pDockQ']:.3f} LIS={pair['LIS']:.3f}")
+```
+
+`compute_ipsae_from_arrays(coords, chains, chain_types, plddt, pae)` does the same
+from in-memory arrays. See `examples/example_ipsae.py`.
+
 ## API Reference
 
 ### File I/O
@@ -186,6 +292,31 @@ for res in sorted(decomp.receptor_residues, key=lambda r: r.total())[:5]:
 | `read_inpcrd(path)` | Load AMBER coordinates, returns `(coords, box)` |
 | `DcdReader(path)` | DCD trajectory reader |
 | `MdcrdReader(path, n_atoms, has_box)` | AMBER ASCII trajectory reader |
+
+### System Building
+
+| Method | Description |
+|--------|-------------|
+| `SystemBuilder()` | Create a tleap-style builder |
+| `.load_protein_ff19sb()`, `.load_gaff2()`, `.load_water_opc()` | Load force fields / water model |
+| `.load_custom_frcmod(path)`, `.load_custom_lib(path)` | Load custom ligand parameters |
+| `.load_pdb(path)`, `.load_mmcif(path)`, `.load_mol2(path)` | Load a structure, returns `System` |
+| `.load_ligand(path, net_charge=0)` | Load + parameterize a ligand (GAFF2 + AM1-BCC) |
+| `.combine([systems])` | Merge systems into one `System` |
+| `.solvate_box(system, buffer=12.0, closeness=1.0)` | Solvate in an OPC water box |
+| `.add_ions(system, ion, count=None)` | Add ions (`"neutralize"`, int count, or float conc.) |
+| `.add_salt(system, cation="Na+", anion="Cl-", concentration=0.150)` | Neutralize + add salt |
+| `.write_amber(system, prmtop, inpcrd)`, `.write_prmtop/.write_inpcrd/.write_pdb` | Write output |
+
+`System` exposes `.n_atoms`, `.n_residues`, `.total_charge`, `.box_dimensions`,
+`.box_angles`.
+
+### Parameterization
+
+| Function | Description |
+|----------|-------------|
+| `parameterize_ligand(input, output, net_charge=0, charge_method="am1bcc")` | Write a GAFF2/charge-assigned mol2 (`"am1bcc"` or `"gasteiger"`) |
+| `compute_am1_charges(atomic_numbers, coords, charge=0)` | Raw AM1 Mulliken charges |
 
 ### AmberTopology
 
@@ -223,10 +354,24 @@ for res in sorted(decomp.receptor_residues, key=lambda r: r.total())[:5]:
 | Function | Description |
 |----------|-------------|
 | `compute_sasa_from_topology(topo, coords)` | SASA using topology for radii |
+| `compute_sasa_trajectory_from_topology(topo, trajectory)` | Per-frame SASA over a trajectory |
 | `calculate_sasa(coords, radii, residue_indices)` | SASA with explicit radii |
 | `kabsch_align(trajectory, reference, align_indices)` | RMSD-minimizing alignment |
 | `unwrap_dcd(path)` | Remove PBC artifacts from DCD |
 | `unwrap_system(trajectory, boxes)` | Remove PBC artifacts |
+| `FingerprintSession(prmtop, trajectory)` | Per-residue LJ/electrostatic fingerprints |
+
+### Minimization
+
+| Function | Description |
+|----------|-------------|
+| `minimize(prmtop, inpcrd, config=None, output=None)` | Minimize from files, returns `MinimizeResult` |
+| `minimize_topology(topo, inpcrd, config=None, output=None)` | Minimize with a pre-loaded topology |
+| `MinimizeConfig(max_cycles, sd_cycles, convergence_rms, cutoff, restraint_mask, restraint_weight, initial_step_size)` | Minimization settings |
+
+`MinimizeResult` exposes `.final_energy`, `.final_rms`, `.cycles`, `.converged`,
+`.energy_components` (`.bond`, `.angle`, `.dihedral`, `.vdw`, `.elec_direct`,
+`.elec_recip`, `.vdw_14`, `.elec_14`, `.total()`).
 
 ### MM-PBSA/GBSA
 
@@ -238,7 +383,27 @@ for res in sorted(decomp.receptor_residues, key=lambda r: r.total())[:5]:
 | `compute_mm_energy(topo, coords)` | Molecular mechanics energy |
 | `compute_gb_energy(topo, coords, params)` | GB solvation energy |
 | `compute_pb_energy(topo, coords, params)` | PB solvation energy |
-| `interaction_entropy(frames, temperature)` | Entropy correction |
+| `compute_sa_energy(topo, coords, params)` | Nonpolar surface-area energy |
+| `interaction_entropy(frames, temperature)` | Interaction-entropy correction |
+| `quasi_harmonic_entropy(...)` | Quasi-harmonic entropy estimate |
+
+Parameter objects: `GbParams`, `PbParams`, `SaParams`, `GbModel`.
+
+### Interface Scoring
+
+| Function | Description |
+|----------|-------------|
+| `compute_ipsae(structure_path, plddt, pae, pdockq_cutoff=8.0, pae_cutoff=12.0)` | ipSAE/pDockQ/LIS/ipTM from a PDB/CIF file |
+| `compute_ipsae_from_arrays(coords, chains, chain_types, plddt, pae, ...)` | Same, from in-memory arrays |
+
+## Agent Skills
+
+The [`skills/`](skills) directory contains [agent skills](skills/README.md) that
+teach AI coding assistants (e.g. Claude Code) how to use this package — system
+building, ligand parameterization, trajectory analysis, MM-PBSA, minimization,
+and ipSAE scoring. They are mirrored under `.claude/skills/` so they load
+automatically when working in this repo. See [`skills/README.md`](skills/README.md)
+for the full list and how to install them elsewhere.
 
 ## Development
 

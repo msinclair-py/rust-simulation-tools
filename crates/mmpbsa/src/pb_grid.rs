@@ -33,6 +33,20 @@ impl PbGrid {
         }
     }
 
+    /// Create a lightweight grid descriptor without allocating data storage.
+    ///
+    /// Useful when the grid is used only for its geometry (dims, spacing, origin)
+    /// and indexing methods, not for storing per-point data (e.g. multigrid level
+    /// descriptors, coarse grids used only as stencil geometry).
+    pub fn descriptor(dims: [usize; 3], spacing: [f64; 3], origin: [f64; 3]) -> Self {
+        Self {
+            dims,
+            spacing,
+            origin,
+            data: Vec::new(),
+        }
+    }
+
     /// Create a grid filled with a constant value.
     pub fn filled(dims: [usize; 3], spacing: [f64; 3], origin: [f64; 3], value: f64) -> Self {
         let n = dims[0] * dims[1] * dims[2];
@@ -298,24 +312,251 @@ impl DielectricMaps {
     }
 }
 
-/// Test whether a point is inside the molecular surface (within any atom's radius).
-fn point_inside_molecule(
-    point: &[f64; 3],
-    coords: &[[f64; 3]],
-    radii: &[f64],
-    probe_radius: f64,
-) -> bool {
-    for (c, &r) in coords.iter().zip(radii.iter()) {
-        let dx = point[0] - c[0];
-        let dy = point[1] - c[1];
-        let dz = point[2] - c[2];
-        let dist_sq = dx * dx + dy * dy + dz * dz;
-        let threshold = r + probe_radius;
-        if dist_sq < threshold * threshold {
-            return true;
+/// Cell-based spatial hash for fast proximity queries against atom spheres.
+///
+/// Bins atoms into a uniform grid of cells, enabling O(1) amortized
+/// `point_inside_molecule` queries instead of the O(N_atoms) linear scan.
+struct AtomSpatialHash {
+    #[allow(dead_code)]
+    cell_size: f64,
+    inv_cell_size: f64,
+    origin: [f64; 3],
+    grid_dims: [usize; 3],
+    /// For each cell, the indices of atoms whose inflated sphere may overlap it.
+    cells: Vec<Vec<usize>>,
+}
+
+impl AtomSpatialHash {
+    /// Build a spatial hash from atom positions and the maximum effective radius.
+    ///
+    /// `max_effective_radius` should be `max(radii) + max(probe_radii_used)`.
+    fn new(coords: &[[f64; 3]], max_effective_radius: f64) -> Self {
+        if coords.is_empty() {
+            return Self {
+                cell_size: 1.0,
+                inv_cell_size: 1.0,
+                origin: [0.0; 3],
+                grid_dims: [0; 3],
+                cells: Vec::new(),
+            };
+        }
+
+        let cell_size = max_effective_radius.max(0.1);
+        let inv_cell_size = 1.0 / cell_size;
+
+        // Compute bounding box of atoms expanded by max_effective_radius
+        let mut min = [f64::MAX; 3];
+        let mut max = [f64::MIN; 3];
+        for c in coords {
+            for d in 0..3 {
+                if c[d] < min[d] { min[d] = c[d]; }
+                if c[d] > max[d] { max[d] = c[d]; }
+            }
+        }
+
+        let origin = [
+            min[0] - max_effective_radius,
+            min[1] - max_effective_radius,
+            min[2] - max_effective_radius,
+        ];
+        let grid_dims = [
+            ((max[0] - origin[0]) * inv_cell_size).ceil() as usize + 1,
+            ((max[1] - origin[1]) * inv_cell_size).ceil() as usize + 1,
+            ((max[2] - origin[2]) * inv_cell_size).ceil() as usize + 1,
+        ];
+        let n_cells = grid_dims[0] * grid_dims[1] * grid_dims[2];
+        let mut cells = vec![Vec::new(); n_cells];
+
+        for (i, c) in coords.iter().enumerate() {
+            let cx = ((c[0] - origin[0]) * inv_cell_size) as usize;
+            let cy = ((c[1] - origin[1]) * inv_cell_size) as usize;
+            let cz = ((c[2] - origin[2]) * inv_cell_size) as usize;
+            let cell_idx = cx + grid_dims[0] * (cy + grid_dims[1] * cz);
+            cells[cell_idx].push(i);
+        }
+
+        Self {
+            cell_size,
+            inv_cell_size,
+            origin,
+            grid_dims,
+            cells,
         }
     }
-    false
+
+    /// Test whether a point is inside any atom's inflated sphere.
+    ///
+    /// Only checks atoms in the local 3x3x3 cell neighborhood.
+    #[inline]
+    fn point_inside(
+        &self,
+        point: &[f64; 3],
+        coords: &[[f64; 3]],
+        radii: &[f64],
+        probe_radius: f64,
+    ) -> bool {
+        if self.cells.is_empty() {
+            return false;
+        }
+
+        let fx = (point[0] - self.origin[0]) * self.inv_cell_size;
+        let fy = (point[1] - self.origin[1]) * self.inv_cell_size;
+        let fz = (point[2] - self.origin[2]) * self.inv_cell_size;
+
+        let cx = fx as isize;
+        let cy = fy as isize;
+        let cz = fz as isize;
+
+        let gnx = self.grid_dims[0] as isize;
+        let gny = self.grid_dims[1] as isize;
+        let gnz = self.grid_dims[2] as isize;
+
+        for dz in -1..=1 {
+            let jz = cz + dz;
+            if jz < 0 || jz >= gnz { continue; }
+            for dy in -1..=1 {
+                let jy = cy + dy;
+                if jy < 0 || jy >= gny { continue; }
+                for dx in -1..=1 {
+                    let jx = cx + dx;
+                    if jx < 0 || jx >= gnx { continue; }
+
+                    let cell_idx = jx as usize
+                        + self.grid_dims[0] * (jy as usize + self.grid_dims[1] * jz as usize);
+                    for &atom_i in &self.cells[cell_idx] {
+                        let c = &coords[atom_i];
+                        let ddx = point[0] - c[0];
+                        let ddy = point[1] - c[1];
+                        let ddz = point[2] - c[2];
+                        let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+                        let threshold = radii[atom_i] + probe_radius;
+                        if dist_sq < threshold * threshold {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+
+/// 1D squared Euclidean distance transform (Felzenszwalb & Huttenlocher).
+///
+/// Transforms `f` in-place: on input, `f[i] = 0` for set members and `f64::MAX/2`
+/// for non-members. On output, `f[i]` is the squared distance (in grid-index
+/// units) to the nearest set member along this 1D slice.
+fn edt_1d(f: &mut [f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    if n == 1 {
+        // Single element: distance is 0 if set member, stays unchanged otherwise
+        return;
+    }
+
+    let mut k = 0usize;
+    v[0] = 0;
+    z[0] = f64::NEG_INFINITY;
+    z[1] = f64::INFINITY;
+
+    for q in 1..n {
+        loop {
+            let vk = v[k];
+            let s = (f[q] + (q * q) as f64 - f[vk] - (vk * vk) as f64)
+                / (2 * (q - vk)) as f64;
+            if s > z[k] {
+                k += 1;
+                v[k] = q;
+                z[k] = s;
+                z[k + 1] = f64::INFINITY;
+                break;
+            }
+            if k == 0 {
+                // Replace the only parabola
+                v[0] = q;
+                z[0] = f64::NEG_INFINITY;
+                z[1] = f64::INFINITY;
+                break;
+            }
+            k -= 1;
+        }
+    }
+
+    k = 0;
+    for q in 0..n {
+        while z[k + 1] < q as f64 {
+            k += 1;
+        }
+        let diff = q as f64 - v[k] as f64;
+        d[q] = diff * diff + f[v[k]];
+    }
+
+    f.copy_from_slice(&d[..n]);
+}
+
+/// 3D squared Euclidean distance transform via separable 1D passes.
+///
+/// On input, `dist[idx] = 0.0` for "seed" points (connected exterior) and
+/// `f64::MAX/2` for others. On output, `dist[idx]` is the squared Euclidean
+/// distance in grid-index units to the nearest seed point.
+///
+/// The distance in Angstroms² is `dist[idx] * h²` (for uniform spacing `h`).
+fn edt_3d(dist: &mut [f64], dims: [usize; 3]) {
+    let nx = dims[0];
+    let ny = dims[1];
+    let nz = dims[2];
+    let max_dim = nx.max(ny).max(nz);
+
+    // Scratch buffers for edt_1d (reused across all 1D slices)
+    let mut d_buf = vec![0.0f64; max_dim];
+    let mut v_buf = vec![0usize; max_dim];
+    let mut z_buf = vec![0.0f64; max_dim + 1];
+
+    // Pass 1: along x (contiguous in memory)
+    for iz in 0..nz {
+        for iy in 0..ny {
+            let start = iy * nx + iz * nx * ny;
+            let slice = &mut dist[start..start + nx];
+            edt_1d(slice, &mut d_buf[..nx], &mut v_buf[..nx], &mut z_buf[..nx + 1]);
+        }
+    }
+
+    // Pass 2: along y (strided, need to gather/scatter)
+    let mut col = vec![0.0f64; ny];
+    for iz in 0..nz {
+        for ix in 0..nx {
+            // Gather y-column
+            for iy in 0..ny {
+                col[iy] = dist[ix + nx * (iy + ny * iz)];
+            }
+            edt_1d(&mut col, &mut d_buf[..ny], &mut v_buf[..ny], &mut z_buf[..ny + 1]);
+            // Scatter back
+            for iy in 0..ny {
+                dist[ix + nx * (iy + ny * iz)] = col[iy];
+            }
+        }
+    }
+
+    // Pass 3: along z (strided)
+    let mut col_z = vec![0.0f64; nz];
+    for iy in 0..ny {
+        for ix in 0..nx {
+            let stride = nx * ny;
+            let base = ix + nx * iy;
+            // Gather z-column
+            for iz in 0..nz {
+                col_z[iz] = dist[base + stride * iz];
+            }
+            edt_1d(&mut col_z, &mut d_buf[..nz], &mut v_buf[..nz], &mut z_buf[..nz + 1]);
+            // Scatter back
+            for iz in 0..nz {
+                dist[base + stride * iz] = col_z[iz];
+            }
+        }
+    }
 }
 
 /// Compute Solvent-Excluded Surface (SES) inside/outside classification.
@@ -343,6 +584,11 @@ fn compute_inside_ses(
     let nz = grid.dims[2];
     let n = nx * ny * nz;
 
+    // Build spatial hash with max effective radius covering both VDW and SAS queries
+    let max_r = radii.iter().cloned().fold(0.0f64, f64::max);
+    let max_effective_r = max_r + probe_radius.max(0.0);
+    let spatial_hash = AtomSpatialHash::new(coords, max_effective_r);
+
     if probe_radius <= 0.0 {
         // No probe: SES = VDW surface
         return (0..n)
@@ -352,7 +598,7 @@ fn compute_inside_ses(
                 let iy = (idx % (nx * ny)) / nx;
                 let ix = idx % nx;
                 let pt = grid.point(ix, iy, iz);
-                point_inside_molecule(&pt, coords, radii, 0.0)
+                spatial_hash.point_inside(&pt, coords, radii, 0.0)
             })
             .collect();
     }
@@ -366,7 +612,7 @@ fn compute_inside_ses(
             let iy = (idx % (nx * ny)) / nx;
             let ix = idx % nx;
             let pt = grid.point(ix, iy, iz);
-            point_inside_molecule(&pt, coords, radii, probe_radius)
+            spatial_hash.point_inside(&pt, coords, radii, probe_radius)
         })
         .collect();
 
@@ -439,52 +685,25 @@ fn compute_inside_ses(
         }
     }
 
-    // Step 3: Dilate connected exterior by probe_radius.
-    // A point is outside SES if any connected_exterior point is within probe_radius.
-    let probe_sq = probe_radius * probe_radius;
-    let rx = (probe_radius / grid.spacing[0]).ceil() as isize;
-    let ry = (probe_radius / grid.spacing[1]).ceil() as isize;
-    let rz = (probe_radius / grid.spacing[2]).ceil() as isize;
+    // Step 3: Compute squared distance from each grid point to the nearest
+    // connected exterior point using an O(N) Euclidean distance transform,
+    // replacing the O(N*R^3) brute-force dilation.
+    let h = grid.spacing[0]; // uniform spacing
+    // Threshold in grid-index units: point is outside SES if distance <= probe_radius/h
+    let threshold_sq = (probe_radius / h) * (probe_radius / h);
+    let big = (n as f64) * 2.0; // large sentinel (greater than any real squared distance)
 
+    let mut dist = vec![0.0f64; n];
+    for i in 0..n {
+        dist[i] = if connected_exterior[i] { 0.0 } else { big };
+    }
+
+    edt_3d(&mut dist, [nx, ny, nz]);
+
+    // A point is inside SES if no connected exterior point is within probe_radius
     (0..n)
         .into_par_iter()
-        .map(|idx| {
-            let iz = (idx / (nx * ny)) as isize;
-            let iy = ((idx % (nx * ny)) / nx) as isize;
-            let ix = (idx % nx) as isize;
-            let pt = grid.point(ix as usize, iy as usize, iz as usize);
-
-            for dz in -rz..=rz {
-                let jz = iz + dz;
-                if jz < 0 || jz >= nz as isize {
-                    continue;
-                }
-                for dy in -ry..=ry {
-                    let jy = iy + dy;
-                    if jy < 0 || jy >= ny as isize {
-                        continue;
-                    }
-                    for dx in -rx..=rx {
-                        let jx = ix + dx;
-                        if jx < 0 || jx >= nx as isize {
-                            continue;
-                        }
-
-                        let jidx = grid.index(jx as usize, jy as usize, jz as usize);
-                        if connected_exterior[jidx] {
-                            let neighbor_pt = grid.point(jx as usize, jy as usize, jz as usize);
-                            let ddx = pt[0] - neighbor_pt[0];
-                            let ddy = pt[1] - neighbor_pt[1];
-                            let ddz = pt[2] - neighbor_pt[2];
-                            if ddx * ddx + ddy * ddy + ddz * ddz <= probe_sq {
-                                return false; // Probe can reach -> outside SES
-                            }
-                        }
-                    }
-                }
-            }
-            true // No probe can reach -> inside SES
-        })
+        .map(|idx| dist[idx] > threshold_sq)
         .collect()
 }
 
@@ -517,8 +736,13 @@ fn fraction_inside_along_axis(
         _ => (0, 1),
     };
 
-    // Collect intervals along the edge that lie inside each atom's sphere
-    let mut intervals: Vec<(f64, f64)> = Vec::new();
+    // Collect intervals along the edge that lie inside each atom's sphere.
+    // Use a stack buffer for the common case (few overlapping atoms per edge)
+    // to avoid heap allocation. Falls back to Vec if the buffer overflows.
+    const STACK_CAP: usize = 16;
+    let mut stack_buf: [(f64, f64); STACK_CAP] = [(0.0, 0.0); STACK_CAP];
+    let mut stack_len = 0usize;
+    let mut heap_buf: Vec<(f64, f64)> = Vec::new();
 
     for (c, &r) in coords.iter().zip(radii.iter()) {
         let big_r = r + probe_radius;
@@ -532,9 +756,24 @@ fn fraction_inside_along_axis(
         let ilo = (c[axis] - rho).max(lo);
         let ihi = (c[axis] + rho).min(hi);
         if ilo < ihi {
-            intervals.push((ilo, ihi));
+            if stack_len < STACK_CAP {
+                stack_buf[stack_len] = (ilo, ihi);
+                stack_len += 1;
+            } else {
+                // Spill to heap on first overflow
+                if heap_buf.is_empty() {
+                    heap_buf.extend_from_slice(&stack_buf[..stack_len]);
+                }
+                heap_buf.push((ilo, ihi));
+            }
         }
     }
+
+    let intervals: &mut [(f64, f64)] = if heap_buf.is_empty() {
+        &mut stack_buf[..stack_len]
+    } else {
+        &mut heap_buf[..]
+    };
 
     if intervals.is_empty() {
         return 0.0;
@@ -597,6 +836,17 @@ pub fn assign_dielectrics(
     let ny = grid.dims[1];
     let nz = grid.dims[2];
     let n = nx * ny * nz;
+
+    // Short-circuit: when eps_in == eps_out (e.g. reference solve), the
+    // dielectric is uniform everywhere. Skip the expensive SES computation.
+    if (eps_in - eps_out).abs() < f64::EPSILON {
+        return DielectricMaps {
+            eps_x: vec![eps_in; n],
+            eps_y: vec![eps_in; n],
+            eps_z: vec![eps_in; n],
+            dims: grid.dims,
+        };
+    }
 
     // Use the Solvent-Excluded Surface for inside/outside classification.
     // This handles re-entrant regions correctly, unlike the simpler SAS
@@ -713,6 +963,10 @@ pub fn assign_kappa(
     // κ̄² = ε_s · κ² is the coefficient in the linearized PBE
     let kappa_bar_sq = solvent_dielectric * kappa_bulk * kappa_bulk;
 
+    // Spatial hash for O(1) amortized lookups instead of O(N_atoms)
+    let max_r = radii.iter().cloned().fold(0.0f64, f64::max) + ion_radius;
+    let spatial_hash = AtomSpatialHash::new(coords, max_r);
+
     (0..n)
         .into_par_iter()
         .map(|idx| {
@@ -721,7 +975,7 @@ pub fn assign_kappa(
             let ix = idx % nx;
             let pt = grid.point(ix, iy, iz);
             // Ion exclusion: atom radius + ion_radius
-            if point_inside_molecule(&pt, coords, radii, ion_radius) {
+            if spatial_hash.point_inside(&pt, coords, radii, ion_radius) {
                 0.0
             } else {
                 kappa_bar_sq

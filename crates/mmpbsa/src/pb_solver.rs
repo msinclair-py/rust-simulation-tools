@@ -17,8 +17,46 @@ pub enum BoundaryCondition {
     /// Debye-Huckel single-sphere approximation on boundaries.
     DebyeHuckel,
     /// Interpolated from a coarse grid solution (for focusing).
-    /// Contains the precomputed boundary values for each boundary grid point.
-    Interpolated(Vec<f64>),
+    /// Stores only boundary point (grid_index, value) pairs instead of a
+    /// full-grid Vec, saving ~30 MB for a typical 161³ grid.
+    Interpolated(Vec<(usize, f64)>),
+}
+
+/// Iterate over all boundary points of a 3D grid, calling `f(ix, iy, iz)` for each.
+///
+/// Directly iterates the 6 faces (two z-slabs, two y-slabs, two x-slabs)
+/// instead of a full 3D loop with a `continue` check, reducing overhead
+/// for large grids where the boundary is O(N^2) but the interior is O(N^3).
+#[inline]
+fn for_each_boundary_point(dims: &[usize; 3], mut f: impl FnMut(usize, usize, usize)) {
+    let [nx, ny, nz] = *dims;
+
+    // z = 0 and z = nz-1 faces (full xy slabs)
+    for &iz in &[0, nz - 1] {
+        for iy in 0..ny {
+            for ix in 0..nx {
+                f(ix, iy, iz);
+            }
+        }
+    }
+
+    // y = 0 and y = ny-1 faces (excluding z corners already covered)
+    for iz in 1..nz - 1 {
+        for &iy in &[0, ny - 1] {
+            for ix in 0..nx {
+                f(ix, iy, iz);
+            }
+        }
+    }
+
+    // x = 0 and x = nx-1 edges (excluding z and y corners already covered)
+    for iz in 1..nz - 1 {
+        for iy in 1..ny - 1 {
+            for &ix in &[0, nx - 1] {
+                f(ix, iy, iz);
+            }
+        }
+    }
 }
 
 /// Set Debye-Huckel boundary conditions on the grid.
@@ -35,102 +73,67 @@ fn set_dh_boundary(
     kappa: f64,
     eps_out: f64,
 ) {
-    let nx = grid.dims[0];
-    let ny = grid.dims[1];
-    let nz = grid.dims[2];
     let conversion = 332.0522; // kcal*A/(mol*e^2)
 
-    // Iterate over all boundary points
-    for iz in 0..nz {
-        for iy in 0..ny {
-            for ix in 0..nx {
-                let is_boundary =
-                    ix == 0 || ix == nx - 1 || iy == 0 || iy == ny - 1 || iz == 0 || iz == nz - 1;
-                if !is_boundary {
-                    continue;
-                }
-
-                let pt = grid.point(ix, iy, iz);
-                let mut phi = 0.0;
-                for (c, &q) in coords.iter().zip(charges.iter()) {
-                    let dx = pt[0] - c[0];
-                    let dy = pt[1] - c[1];
-                    let dz = pt[2] - c[2];
-                    let r = (dx * dx + dy * dy + dz * dz).sqrt();
-                    if r > 1e-10 {
-                        phi += conversion * q * (-kappa * r).exp() / (eps_out * r);
-                    }
-                }
-                let idx = grid.index(ix, iy, iz);
-                potential[idx] = phi;
+    for_each_boundary_point(&grid.dims, |ix, iy, iz| {
+        let pt = grid.point(ix, iy, iz);
+        let mut phi = 0.0;
+        for (c, &q) in coords.iter().zip(charges.iter()) {
+            let dx = pt[0] - c[0];
+            let dy = pt[1] - c[1];
+            let dz = pt[2] - c[2];
+            let r = (dx * dx + dy * dy + dz * dz).sqrt();
+            if r > 1e-10 {
+                phi += conversion * q * (-kappa * r).exp() / (eps_out * r);
             }
         }
-    }
+        let idx = grid.index(ix, iy, iz);
+        potential[idx] = phi;
+    });
 }
 
 /// Compute interpolated boundary conditions from a coarse grid solution.
 ///
 /// For each boundary point of `fine_grid`, looks up the corresponding
 /// position in the coarse solution via trilinear interpolation.
+/// Returns a sparse list of (grid_index, value) pairs for boundary points only.
 pub fn interpolated_boundary(
     fine_grid: &PbGrid,
     coarse_grid: &PbGrid,
     coarse_potential: &[f64],
-) -> Vec<f64> {
-    let nx = fine_grid.dims[0];
-    let ny = fine_grid.dims[1];
-    let nz = fine_grid.dims[2];
-    let n = nx * ny * nz;
-    let mut boundary = vec![0.0f64; n];
+) -> Vec<(usize, f64)> {
+    let mut boundary = Vec::new();
 
-    for iz in 0..nz {
-        for iy in 0..ny {
-            for ix in 0..nx {
-                let is_boundary =
-                    ix == 0 || ix == nx - 1 || iy == 0 || iy == ny - 1 || iz == 0 || iz == nz - 1;
-                if !is_boundary {
-                    continue;
-                }
-                let pt = fine_grid.point(ix, iy, iz);
-                let idx = fine_grid.index(ix, iy, iz);
-                boundary[idx] = coarse_grid.interpolate_with_data(&pt, coarse_potential);
-            }
-        }
-    }
+    for_each_boundary_point(&fine_grid.dims, |ix, iy, iz| {
+        let pt = fine_grid.point(ix, iy, iz);
+        let idx = fine_grid.index(ix, iy, iz);
+        let val = coarse_grid.interpolate_with_data(&pt, coarse_potential);
+        boundary.push((idx, val));
+    });
     boundary
 }
 
-/// Set boundary conditions from precomputed interpolated values.
-fn set_interpolated_boundary(potential: &mut [f64], grid: &PbGrid, boundary: &[f64]) {
-    let nx = grid.dims[0];
-    let ny = grid.dims[1];
-    let nz = grid.dims[2];
-
-    for iz in 0..nz {
-        for iy in 0..ny {
-            for ix in 0..nx {
-                let is_boundary =
-                    ix == 0 || ix == nx - 1 || iy == 0 || iy == ny - 1 || iz == 0 || iz == nz - 1;
-                if !is_boundary {
-                    continue;
-                }
-                let idx = grid.index(ix, iy, iz);
-                potential[idx] = boundary[idx];
-            }
-        }
+/// Set boundary conditions from precomputed sparse interpolated values.
+fn set_interpolated_boundary(potential: &mut [f64], boundary: &[(usize, f64)]) {
+    for &(idx, val) in boundary {
+        potential[idx] = val;
     }
+}
+
+/// Estimate the spectral radius of the Jacobi iteration for a 3D Laplacian.
+fn spectral_radius(dims: &[usize; 3]) -> f64 {
+    let nx = dims[0] as f64;
+    let ny = dims[1] as f64;
+    let nz = dims[2] as f64;
+    ((std::f64::consts::PI / nx).cos()
+        + (std::f64::consts::PI / ny).cos()
+        + (std::f64::consts::PI / nz).cos())
+        / 3.0
 }
 
 /// Estimate the optimal SOR relaxation parameter from grid dimensions.
 fn estimate_omega(dims: &[usize; 3]) -> f64 {
-    // Spectral radius of Jacobi iteration for 3D Laplacian
-    let nx = dims[0] as f64;
-    let ny = dims[1] as f64;
-    let nz = dims[2] as f64;
-    let rho = ((std::f64::consts::PI / nx).cos()
-        + (std::f64::consts::PI / ny).cos()
-        + (std::f64::consts::PI / nz).cos())
-        / 3.0;
+    let rho = spectral_radius(dims);
     // Optimal SOR omega
     2.0 / (1.0 + (1.0 - rho * rho).sqrt())
 }
@@ -151,9 +154,49 @@ pub struct PbSolveResult {
 // 4pi * 332.0522 converts from e/A^3 charge density to kcal/mol/e potential units
 const FOUR_PI_EC: f64 = 4.0 * std::f64::consts::PI * 332.0522;
 
-/// Tile size for cache-friendly traversal. A 16x16x16 tile uses
-/// 16*16*16*8 = 32KB, fitting in L1 cache.
-const TILE: usize = 16;
+/// Compute the neighbor sum and diagonal coefficient at a grid point.
+///
+/// This is the core finite-difference stencil for the linearized PBE,
+/// shared between SOR smoothing and residual computation.
+#[inline(always)]
+fn stencil_at(
+    idx: usize,
+    idx_xm: usize,
+    idx_xp: usize,
+    idx_ym: usize,
+    idx_yp: usize,
+    idx_zm: usize,
+    idx_zp: usize,
+    potential: &[f64],
+    dielectrics: &DielectricMaps,
+    kappa_sq: &[f64],
+    inv_hx2: f64,
+    inv_hy2: f64,
+    inv_hz2: f64,
+) -> (f64, f64) {
+    let ex_p = dielectrics.eps_x[idx];
+    let ex_m = dielectrics.eps_x[idx_xm];
+    let ey_p = dielectrics.eps_y[idx];
+    let ey_m = dielectrics.eps_y[idx_ym];
+    let ez_p = dielectrics.eps_z[idx];
+    let ez_m = dielectrics.eps_z[idx_zm];
+
+    let neighbor_sum = (ex_p * potential[idx_xp] + ex_m * potential[idx_xm]) * inv_hx2
+        + (ey_p * potential[idx_yp] + ey_m * potential[idx_ym]) * inv_hy2
+        + (ez_p * potential[idx_zp] + ez_m * potential[idx_zm]) * inv_hz2;
+
+    let diag = (ex_p + ex_m) * inv_hx2
+        + (ey_p + ey_m) * inv_hy2
+        + (ez_p + ez_m) * inv_hz2
+        + kappa_sq[idx];
+
+    (neighbor_sum, diag)
+}
+
+/// Tile size for cache-friendly traversal. An 8x8x8 tile touching 7 arrays
+/// uses 8*8*8*8*7 ≈ 28 KB, fitting comfortably in L1 cache (32-48 KB).
+/// The previous 16^3 tile (229 KB working set) exceeded L1.
+const TILE: usize = 8;
 
 /// Wrapper for safe parallel access to the potential array.
 /// Safety: red-black ordering guarantees that within a single color sweep,
@@ -183,12 +226,17 @@ fn sor_smooth(
     let nz = grid.dims[2];
     let n = nx * ny * nz;
 
-    let hx = grid.spacing[0];
-    let hy = grid.spacing[1];
-    let hz = grid.spacing[2];
-    let hx2 = hx * hx;
-    let hy2 = hy * hy;
-    let hz2 = hz * hz;
+    // Precompute strides for direct index arithmetic
+    let stride_y = nx;
+    let stride_z = nx * ny;
+
+    // Precompute reciprocals to replace divisions with multiplications
+    let inv_hx2 = 1.0 / (grid.spacing[0] * grid.spacing[0]);
+    let inv_hy2 = 1.0 / (grid.spacing[1] * grid.spacing[1]);
+    let inv_hz2 = 1.0 / (grid.spacing[2] * grid.spacing[2]);
+
+    // Collect tile starts once, reused across all sweeps and colors
+    let z_tiles: Vec<usize> = (1..nz - 1).step_by(TILE).collect();
 
     let mut last_rms = 0.0;
 
@@ -199,13 +247,17 @@ fn sor_smooth(
         let ptr = UnsafePotential(potential.as_mut_ptr());
 
         // Red-black SOR: two half-sweeps
-        for color in 0..2 {
-            let z_tiles: Vec<usize> = (1..nz - 1).step_by(TILE).collect();
+        for color in 0..2usize {
             let (color_rms, color_count): (f64, u64) = z_tiles
-                .into_par_iter()
+                .par_iter()
                 .map({
                     let ptr = &ptr;
-                    move |tz| {
+                    move |&tz| {
+                        // Safety: each thread only reads neighbors (opposite color,
+                        // not being written) and writes to its own color points.
+                        let potential =
+                            unsafe { std::slice::from_raw_parts_mut(ptr.0, n) };
+
                         let mut local_rms = 0.0;
                         let mut local_count = 0u64;
                         let iz_end = (tz + TILE).min(nz - 1);
@@ -215,48 +267,29 @@ fn sor_smooth(
                                 let ix_end = (tx + TILE).min(nx - 1);
                                 for iz in tz..iz_end {
                                     for iy in ty..iy_end {
-                                        for ix in tx..ix_end {
-                                            if (ix + iy + iz) % 2 != color {
-                                                continue;
-                                            }
+                                        // Step by 2 with correct parity offset,
+                                        // eliminating the color-check branch entirely
+                                        let ix_start = tx + ((tx + iy + iz + color) % 2);
+                                        for ix in (ix_start..ix_end).step_by(2) {
+                                            let idx = ix + stride_y * iy + stride_z * iz;
 
-                                            let idx = grid.index(ix, iy, iz);
-
-                                            let ex_p = dielectrics.eps_x[grid.index(ix, iy, iz)];
-                                            let ex_m =
-                                                dielectrics.eps_x[grid.index(ix - 1, iy, iz)];
-                                            let ey_p = dielectrics.eps_y[grid.index(ix, iy, iz)];
-                                            let ey_m =
-                                                dielectrics.eps_y[grid.index(ix, iy - 1, iz)];
-                                            let ez_p = dielectrics.eps_z[grid.index(ix, iy, iz)];
-                                            let ez_m =
-                                                dielectrics.eps_z[grid.index(ix, iy, iz - 1)];
-
-                                            // Safety: each thread only reads neighbors (opposite color,
-                                            // not being written) and writes to its own color points.
-                                            let potential =
-                                                unsafe { std::slice::from_raw_parts_mut(ptr.0, n) };
-
-                                            let neighbor_sum =
-                                                ex_p * potential[grid.index(ix + 1, iy, iz)] / hx2
-                                                    + ex_m * potential[grid.index(ix - 1, iy, iz)]
-                                                        / hx2
-                                                    + ey_p * potential[grid.index(ix, iy + 1, iz)]
-                                                        / hy2
-                                                    + ey_m * potential[grid.index(ix, iy - 1, iz)]
-                                                        / hy2
-                                                    + ez_p * potential[grid.index(ix, iy, iz + 1)]
-                                                        / hz2
-                                                    + ez_m * potential[grid.index(ix, iy, iz - 1)]
-                                                        / hz2;
-
-                                            let diag = (ex_p + ex_m) / hx2
-                                                + (ey_p + ey_m) / hy2
-                                                + (ez_p + ez_m) / hz2
-                                                + kappa_sq[idx];
+                                            let (neighbor_sum, diag) = stencil_at(
+                                                idx,
+                                                idx - 1,
+                                                idx + 1,
+                                                idx - stride_y,
+                                                idx + stride_y,
+                                                idx - stride_z,
+                                                idx + stride_z,
+                                                potential,
+                                                dielectrics,
+                                                kappa_sq,
+                                                inv_hx2,
+                                                inv_hy2,
+                                                inv_hz2,
+                                            );
 
                                             let rhs = rhs_scale * charge_map[idx];
-
                                             let phi_gs = (neighbor_sum + rhs) / diag;
                                             let phi_new =
                                                 potential[idx] + omega * (phi_gs - potential[idx]);
@@ -316,24 +349,63 @@ pub fn solve_lpbe(
     tolerance: f64,
     max_iterations: usize,
 ) -> PbSolveResult {
-    let n = grid.len();
-    let mut potential = vec![0.0f64; n];
+    solve_lpbe_initial(
+        grid,
+        charge_map,
+        dielectrics,
+        kappa_sq,
+        boundary,
+        coords,
+        charges,
+        kappa_bulk,
+        eps_out,
+        tolerance,
+        max_iterations,
+        None,
+    )
+}
 
-    // Set boundary conditions
+/// Solve the linearized PBE using SOR, optionally starting from an initial potential.
+///
+/// When `initial_potential` is `Some(...)`, uses it as the starting point
+/// (boundary conditions are still applied on top). This avoids discarding
+/// work from a partially-converged multigrid solve.
+fn solve_lpbe_initial(
+    grid: &PbGrid,
+    charge_map: &[f64],
+    dielectrics: &DielectricMaps,
+    kappa_sq: &[f64],
+    boundary: BoundaryCondition,
+    coords: &[[f64; 3]],
+    charges: &[f64],
+    kappa_bulk: f64,
+    eps_out: f64,
+    tolerance: f64,
+    max_iterations: usize,
+    initial_potential: Option<Vec<f64>>,
+) -> PbSolveResult {
+    let n = grid.len();
+    let mut potential = initial_potential.unwrap_or_else(|| vec![0.0f64; n]);
+
+    // Set boundary conditions (re-applied even with initial potential)
     match &boundary {
         BoundaryCondition::Zero => {}
         BoundaryCondition::DebyeHuckel => {
             set_dh_boundary(&mut potential, grid, coords, charges, kappa_bulk, eps_out);
         }
         BoundaryCondition::Interpolated(bvals) => {
-            set_interpolated_boundary(&mut potential, grid, bvals);
+            set_interpolated_boundary(&mut potential, bvals);
         }
     }
 
-    let omega = estimate_omega(&grid.dims);
+    // Use Chebyshev-accelerated SOR: omega ramps from 1.0 toward the
+    // optimal value, providing faster convergence in the early iterations.
+    let rho_j = spectral_radius(&grid.dims);
+    let rho_sq = rho_j * rho_j;
 
     let mut iterations = 0;
     let mut final_residual = f64::MAX;
+    let mut cheb_omega = 1.0;
 
     for iter in 0..max_iterations {
         final_residual = sor_smooth(
@@ -342,11 +414,19 @@ pub fn solve_lpbe(
             charge_map,
             dielectrics,
             kappa_sq,
-            omega,
+            cheb_omega,
             1,
             FOUR_PI_EC,
         );
         iterations = iter + 1;
+
+        // Advance Chebyshev omega using the recurrence relation:
+        // omega_0 = 1, omega_1 = 1/(1-rho^2/2), omega_n = 1/(1-rho^2*omega_{n-1}/4)
+        if iter == 0 {
+            cheb_omega = 1.0 / (1.0 - rho_sq / 2.0);
+        } else {
+            cheb_omega = 1.0 / (1.0 - rho_sq * cheb_omega / 4.0);
+        }
 
         if final_residual < tolerance {
             return PbSolveResult {
@@ -366,62 +446,71 @@ pub fn solve_lpbe(
     }
 }
 
-/// Compute the residual r = b - A*x at all interior points.
-/// Returns the residual vector (same size as potential). Boundary values are 0.
+/// Compute residual into a pre-allocated buffer (avoids allocation).
 ///
-/// `rhs_scale` multiplies `charge_map` to form the RHS, same as in `sor_smooth`.
-fn compute_residual(
+/// `out` must be at least `grid.len()` elements. Boundary values are set to 0.
+/// Uses rayon parallelism over z-slabs for large grids.
+fn compute_residual_into(
     grid: &PbGrid,
     potential: &[f64],
     charge_map: &[f64],
     dielectrics: &DielectricMaps,
     kappa_sq: &[f64],
     rhs_scale: f64,
-) -> Vec<f64> {
+    out: &mut [f64],
+) {
     let nx = grid.dims[0];
     let ny = grid.dims[1];
     let nz = grid.dims[2];
+
+    let stride_y = nx;
+    let stride_z = nx * ny;
+    let inv_hx2 = 1.0 / (grid.spacing[0] * grid.spacing[0]);
+    let inv_hy2 = 1.0 / (grid.spacing[1] * grid.spacing[1]);
+    let inv_hz2 = 1.0 / (grid.spacing[2] * grid.spacing[2]);
+
+    // Zero the entire buffer (boundaries stay 0)
+    out[..nx * ny * nz].fill(0.0);
+
+    // Parallel over z-slabs: each z-slab writes to disjoint output indices
+    let out_ptr = UnsafePotential(out.as_mut_ptr());
     let n = nx * ny * nz;
 
-    let hx2 = grid.spacing[0] * grid.spacing[0];
-    let hy2 = grid.spacing[1] * grid.spacing[1];
-    let hz2 = grid.spacing[2] * grid.spacing[2];
+    (1..nz - 1).into_par_iter().for_each(|iz| {
+        // Safety: each z iteration writes only to indices in [stride_z*iz .. stride_z*(iz+1)),
+        // and these ranges are disjoint across different iz values.
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr.0, n) };
+        let _ = &out_ptr; // ensure out_ptr is captured, not out
 
-    let mut residual = vec![0.0; n];
-
-    for iz in 1..nz - 1 {
         for iy in 1..ny - 1 {
             for ix in 1..nx - 1 {
-                let idx = grid.index(ix, iy, iz);
+                let idx = ix + stride_y * iy + stride_z * iz;
 
-                let ex_p = dielectrics.eps_x[grid.index(ix, iy, iz)];
-                let ex_m = dielectrics.eps_x[grid.index(ix - 1, iy, iz)];
-                let ey_p = dielectrics.eps_y[grid.index(ix, iy, iz)];
-                let ey_m = dielectrics.eps_y[grid.index(ix, iy - 1, iz)];
-                let ez_p = dielectrics.eps_z[grid.index(ix, iy, iz)];
-                let ez_m = dielectrics.eps_z[grid.index(ix, iy, iz - 1)];
+                let (neighbor_sum, diag) = stencil_at(
+                    idx,
+                    idx - 1,
+                    idx + 1,
+                    idx - stride_y,
+                    idx + stride_y,
+                    idx - stride_z,
+                    idx + stride_z,
+                    potential,
+                    dielectrics,
+                    kappa_sq,
+                    inv_hx2,
+                    inv_hy2,
+                    inv_hz2,
+                );
 
-                let neighbor_sum = ex_p * potential[grid.index(ix + 1, iy, iz)] / hx2
-                    + ex_m * potential[grid.index(ix - 1, iy, iz)] / hx2
-                    + ey_p * potential[grid.index(ix, iy + 1, iz)] / hy2
-                    + ey_m * potential[grid.index(ix, iy - 1, iz)] / hy2
-                    + ez_p * potential[grid.index(ix, iy, iz + 1)] / hz2
-                    + ez_m * potential[grid.index(ix, iy, iz - 1)] / hz2;
-
-                let diag =
-                    (ex_p + ex_m) / hx2 + (ey_p + ey_m) / hy2 + (ez_p + ez_m) / hz2 + kappa_sq[idx];
-
-                // residual = rhs - A*x = (rhs_scale * charge) - (diag * phi - neighbor_sum)
-                residual[idx] = rhs_scale * charge_map[idx] + neighbor_sum - diag * potential[idx];
+                out_slice[idx] = rhs_scale * charge_map[idx] + neighbor_sum - diag * potential[idx];
             }
         }
-    }
-
-    residual
+    });
 }
 
 /// Restrict a fine-grid array to a coarse grid using full-weighting.
 /// Coarse grid has dims roughly half the fine grid.
+#[cfg(test)]
 fn restrict(fine: &[f64], fine_dims: &[usize; 3]) -> (Vec<f64>, [usize; 3]) {
     let coarse_dims = [
         fine_dims[0].div_ceil(2),
@@ -478,6 +567,60 @@ fn restrict(fine: &[f64], fine_dims: &[usize; 3]) -> (Vec<f64>, [usize; 3]) {
         }
     }
     (coarse, coarse_dims)
+}
+
+/// Restrict a fine-grid array into a pre-allocated coarse buffer.
+///
+/// Same algorithm as `restrict` but writes into `coarse_out` instead of allocating.
+/// The `scale` parameter is multiplied into every output value, allowing the caller
+/// to fuse post-restriction scaling (e.g. the (h_fine/h_coarse)² = 0.25 factor)
+/// into the restriction pass, eliminating an extra loop over the coarse data.
+fn restrict_into(fine: &[f64], fine_dims: &[usize; 3], coarse_out: &mut [f64], coarse_dims: &[usize; 3], scale: f64) {
+    let cnx = coarse_dims[0];
+    let cny = coarse_dims[1];
+    let cnz = coarse_dims[2];
+    let fnx = fine_dims[0];
+    let fny = fine_dims[1];
+    let fnz = fine_dims[2];
+    let fi = |x: usize, y: usize, z: usize| x + fnx * (y + fny * z);
+    let ci_fn = |x: usize, y: usize, z: usize| x + cnx * (y + cny * z);
+
+    for cz in 0..cnz {
+        for cy in 0..cny {
+            for cx in 0..cnx {
+                let fx = 2 * cx;
+                let fy = 2 * cy;
+                let fz = 2 * cz;
+
+                let mut sum = 0.0;
+                let mut weight_sum = 0.0;
+                for dz in -1i32..=1 {
+                    for dy in -1i32..=1 {
+                        for dx in -1i32..=1 {
+                            let ix = fx as i32 + dx;
+                            let iy = fy as i32 + dy;
+                            let iz = fz as i32 + dz;
+                            if ix < 0
+                                || ix >= fnx as i32
+                                || iy < 0
+                                || iy >= fny as i32
+                                || iz < 0
+                                || iz >= fnz as i32
+                            {
+                                continue;
+                            }
+                            let w = (if dx == 0 { 2.0 } else { 1.0 })
+                                * (if dy == 0 { 2.0 } else { 1.0 })
+                                * (if dz == 0 { 2.0 } else { 1.0 });
+                            sum += w * fine[fi(ix as usize, iy as usize, iz as usize)];
+                            weight_sum += w;
+                        }
+                    }
+                }
+                coarse_out[ci_fn(cx, cy, cz)] = scale * sum / weight_sum;
+            }
+        }
+    }
 }
 
 /// Prolongate a coarse-grid correction to the fine grid using trilinear interpolation.
@@ -604,28 +747,112 @@ fn coarsen_kappa(fine_kappa: &[f64], fine_dims: &[usize; 3], coarse_dims: &[usiz
     coarse
 }
 
-/// Perform one V-cycle of multigrid.
+/// One level of the multigrid hierarchy with pre-computed operators and
+/// pre-allocated work buffers.
+struct MultigridLevel {
+    /// Coarse grid descriptor for this level.
+    coarse_grid: PbGrid,
+    /// Pre-coarsened dielectric maps (invariant across V-cycles).
+    coarse_dielectrics: DielectricMaps,
+    /// Pre-coarsened κ² map (invariant across V-cycles).
+    coarse_kappa: Vec<f64>,
+    /// Pre-computed SOR omega for the coarse grid.
+    coarse_omega: f64,
+    /// Fine-grid dimensions (for restrict/prolongate).
+    fine_dims: [usize; 3],
+    /// Pre-allocated buffer for fine-level residual.
+    fine_residual_buf: Vec<f64>,
+    /// Pre-allocated buffer for coarse-level RHS (restricted residual).
+    coarse_rhs_buf: Vec<f64>,
+    /// Pre-allocated buffer for coarse-level correction.
+    coarse_correction_buf: Vec<f64>,
+}
+
+/// Build the multigrid level hierarchy from the finest grid operators.
 ///
-/// Recursively coarsens, solves, and prolongates.
-/// `rhs_scale` is the factor applied to `charge_map` to form the RHS.
-/// At the finest level this is `FOUR_PI_EC`; at coarse levels it is `1.0`
-/// because the restricted residual already has the correct units.
-fn v_cycle(
+/// Pre-computes coarsened dielectrics and kappa (which are invariant across
+/// V-cycles) and pre-allocates all work buffers at each level, eliminating
+/// per-cycle allocations.
+fn build_multigrid_levels(
+    grid: &PbGrid,
+    dielectrics: &DielectricMaps,
+    kappa_sq: &[f64],
+    min_grid_size: usize,
+) -> Vec<MultigridLevel> {
+    let mut levels = Vec::new();
+    let mut current_dims = grid.dims;
+    let mut current_spacing = grid.spacing;
+    let mut current_diel = dielectrics;
+    let mut current_kappa = kappa_sq;
+
+    // Owned storage for intermediate levels
+    let mut owned_diels: Vec<DielectricMaps> = Vec::new();
+    let mut owned_kappas: Vec<Vec<f64>> = Vec::new();
+
+    loop {
+        let min_dim = current_dims.iter().copied().min().unwrap_or(0);
+        if min_dim <= min_grid_size {
+            break;
+        }
+
+        let coarse_dims = [
+            current_dims[0].div_ceil(2),
+            current_dims[1].div_ceil(2),
+            current_dims[2].div_ceil(2),
+        ];
+        let coarse_spacing = [
+            current_spacing[0] * 2.0,
+            current_spacing[1] * 2.0,
+            current_spacing[2] * 2.0,
+        ];
+        let coarse_n = coarse_dims[0] * coarse_dims[1] * coarse_dims[2];
+        let fine_n = current_dims[0] * current_dims[1] * current_dims[2];
+
+        let coarse_diel = coarsen_dielectrics(current_diel, &current_dims, &coarse_dims);
+        let coarse_kappa = coarsen_kappa(current_kappa, &current_dims, &coarse_dims);
+        let coarse_omega = estimate_omega(&coarse_dims);
+
+        levels.push(MultigridLevel {
+            coarse_grid: PbGrid::descriptor(coarse_dims, coarse_spacing, grid.origin),
+            coarse_dielectrics: coarse_diel,
+            coarse_kappa: coarse_kappa,
+            coarse_omega,
+            fine_dims: current_dims,
+            fine_residual_buf: vec![0.0; fine_n],
+            coarse_rhs_buf: vec![0.0; coarse_n],
+            coarse_correction_buf: vec![0.0; coarse_n],
+        });
+
+        // For next iteration, reference the coarsened operators we just built
+        owned_diels.push(levels.last().unwrap().coarse_dielectrics.clone());
+        owned_kappas.push(levels.last().unwrap().coarse_kappa.clone());
+        current_diel = owned_diels.last().unwrap();
+        current_kappa = owned_kappas.last().unwrap();
+        current_dims = coarse_dims;
+        current_spacing = coarse_spacing;
+    }
+
+    levels
+}
+
+/// Perform one V-cycle of multigrid using pre-allocated workspace.
+///
+/// Uses `split_first_mut` on the levels slice to satisfy the borrow checker
+/// while recursing through the level hierarchy.
+fn v_cycle_workspace(
     grid: &PbGrid,
     potential: &mut [f64],
     charge_map: &[f64],
     dielectrics: &DielectricMaps,
     kappa_sq: &[f64],
+    omega: f64,
+    levels: &mut [MultigridLevel],
     pre_smooth: usize,
     post_smooth: usize,
-    min_grid_size: usize,
     rhs_scale: f64,
 ) {
-    let min_dim = grid.dims.iter().copied().min().unwrap_or(0);
-
-    // Base case: grid is small enough, solve directly with many SOR iterations
-    if min_dim <= min_grid_size {
-        let omega = estimate_omega(&grid.dims);
+    // Base case: no more coarser levels, solve directly
+    if levels.is_empty() {
         sor_smooth(
             grid,
             potential,
@@ -639,7 +866,7 @@ fn v_cycle(
         return;
     }
 
-    let omega = estimate_omega(&grid.dims);
+    let (level, rest) = levels.split_first_mut().unwrap();
 
     // 1. Pre-smooth
     sor_smooth(
@@ -653,57 +880,50 @@ fn v_cycle(
         rhs_scale,
     );
 
-    // 2. Compute residual
-    let residual = compute_residual(
+    // 2. Compute residual into pre-allocated buffer
+    compute_residual_into(
         grid,
         potential,
         charge_map,
         dielectrics,
         kappa_sq,
         rhs_scale,
+        &mut level.fine_residual_buf,
     );
 
-    // 3. Restrict residual to coarse grid.
-    // The fine-grid operator uses 1/h^2 scaling while the coarse-grid operator uses
-    // 1/(2h)^2 = 1/(4h^2). To compensate, we scale the restricted residual by the
-    // ratio (h_fine/h_coarse)^2 = 1/4 so the coarse-grid equation A_c * e = R(r)
-    // produces corrections of the right magnitude.
-    let (mut coarse_rhs, coarse_dims) = restrict(&residual, &grid.dims);
-    let h_ratio_sq = 0.25; // (h / 2h)^2 = 1/4
-    for v in &mut coarse_rhs {
-        *v *= h_ratio_sq;
-    }
+    // 3. Restrict residual to coarse grid with fused (h_fine/h_coarse)² = 0.25 scaling
+    restrict_into(
+        &level.fine_residual_buf,
+        &level.fine_dims,
+        &mut level.coarse_rhs_buf,
+        &level.coarse_grid.dims,
+        0.25,
+    );
 
-    // 4. Build coarse grid and operators
-    let coarse_spacing = [
-        grid.spacing[0] * 2.0,
-        grid.spacing[1] * 2.0,
-        grid.spacing[2] * 2.0,
-    ];
-    let coarse_grid = PbGrid::new(coarse_dims, coarse_spacing, grid.origin);
-    let coarse_diel = coarsen_dielectrics(dielectrics, &grid.dims, &coarse_dims);
-    let coarse_kappa = coarsen_kappa(kappa_sq, &grid.dims, &coarse_dims);
+    // 4. Zero the correction buffer
+    level.coarse_correction_buf.fill(0.0);
 
-    // 5. Initialize coarse correction to zero and solve A_c * e_c = r_c
-    // The restricted residual IS the RHS for the coarse error equation,
-    // so rhs_scale = 1.0 on coarse levels.
-    let mut coarse_correction = vec![0.0; coarse_grid.len()];
-
-    // Recurse
-    v_cycle(
-        &coarse_grid,
-        &mut coarse_correction,
-        &coarse_rhs,
-        &coarse_diel,
-        &coarse_kappa,
+    // 5. Recurse into next coarser level
+    v_cycle_workspace(
+        &level.coarse_grid,
+        &mut level.coarse_correction_buf,
+        &level.coarse_rhs_buf,
+        &level.coarse_dielectrics,
+        &level.coarse_kappa,
+        level.coarse_omega,
+        rest,
         pre_smooth,
         post_smooth,
-        min_grid_size,
-        1.0,
+        1.0, // coarse levels use rhs_scale=1.0
     );
 
     // 6. Prolongate coarse correction and add to fine potential
-    prolongate_add(&coarse_correction, &coarse_dims, potential, &grid.dims);
+    prolongate_add(
+        &level.coarse_correction_buf,
+        &level.coarse_grid.dims,
+        potential,
+        &grid.dims,
+    );
 
     // 7. Post-smooth
     sor_smooth(
@@ -718,22 +938,69 @@ fn v_cycle(
     );
 }
 
-/// Compute the RMS residual over interior grid points.
-fn rms_interior_residual(grid: &PbGrid, residual: &[f64]) -> f64 {
+/// Compute the RMS residual without allocating a full residual vector.
+///
+/// This fuses `compute_residual` and `rms_interior_residual` into a single
+/// pass, avoiding the ~33 MB allocation per call on a 161^3 grid.
+/// Uses rayon parallelism over z-slabs.
+fn compute_rms_residual(
+    grid: &PbGrid,
+    potential: &[f64],
+    charge_map: &[f64],
+    dielectrics: &DielectricMaps,
+    kappa_sq: &[f64],
+    rhs_scale: f64,
+) -> f64 {
     let nx = grid.dims[0];
     let ny = grid.dims[1];
     let nz = grid.dims[2];
-    let mut rms = 0.0;
-    let mut count = 0u64;
-    for iz in 1..nz - 1 {
-        for iy in 1..ny - 1 {
-            for ix in 1..nx - 1 {
-                let idx = grid.index(ix, iy, iz);
-                rms += residual[idx] * residual[idx];
-                count += 1;
+
+    let stride_y = nx;
+    let stride_z = nx * ny;
+    let inv_hx2 = 1.0 / (grid.spacing[0] * grid.spacing[0]);
+    let inv_hy2 = 1.0 / (grid.spacing[1] * grid.spacing[1]);
+    let inv_hz2 = 1.0 / (grid.spacing[2] * grid.spacing[2]);
+
+    // Parallel reduction over z-slabs
+    let (rms, count) = (1..nz - 1)
+        .into_par_iter()
+        .map(|iz| {
+            let mut local_rms = 0.0;
+            let mut local_count = 0u64;
+
+            for iy in 1..ny - 1 {
+                for ix in 1..nx - 1 {
+                    let idx = ix + stride_y * iy + stride_z * iz;
+
+                    let (neighbor_sum, diag) = stencil_at(
+                        idx,
+                        idx - 1,
+                        idx + 1,
+                        idx - stride_y,
+                        idx + stride_y,
+                        idx - stride_z,
+                        idx + stride_z,
+                        potential,
+                        dielectrics,
+                        kappa_sq,
+                        inv_hx2,
+                        inv_hy2,
+                        inv_hz2,
+                    );
+
+                    let r = rhs_scale * charge_map[idx] + neighbor_sum - diag * potential[idx];
+                    local_rms += r * r;
+                    local_count += 1;
+                }
             }
-        }
-    }
+
+            (local_rms, local_count)
+        })
+        .reduce(
+            || (0.0, 0u64),
+            |(a_rms, a_cnt), (b_rms, b_cnt)| (a_rms + b_rms, a_cnt + b_cnt),
+        );
+
     if count > 0 {
         (rms / count as f64).sqrt()
     } else {
@@ -768,7 +1035,7 @@ pub fn solve_lpbe_multigrid(
             set_dh_boundary(&mut potential, grid, coords, charges, kappa_bulk, eps_out);
         }
         BoundaryCondition::Interpolated(bvals) => {
-            set_interpolated_boundary(&mut potential, grid, bvals);
+            set_interpolated_boundary(&mut potential, bvals);
         }
     }
 
@@ -799,23 +1066,31 @@ pub fn solve_lpbe_multigrid(
     // avoid runaway computation on large grids in debug builds.
     let max_vcycles = (max_iterations / 6).clamp(1, 200);
 
+    // Build multigrid workspace once: pre-computes coarsened operators
+    // (invariant across V-cycles) and pre-allocates all work buffers.
+    let mut mg_levels = build_multigrid_levels(grid, dielectrics, kappa_sq, min_grid_size);
+    let omega = estimate_omega(&grid.dims);
+
+    let mut best_rms = f64::MAX;
+    let mut growing_count = 0u32;
     let mut prev_rms = f64::MAX;
 
     for cycle in 0..max_vcycles {
-        v_cycle(
+        v_cycle_workspace(
             grid,
             &mut potential,
             charge_map,
             dielectrics,
             kappa_sq,
+            omega,
+            &mut mg_levels,
             pre_smooth,
             post_smooth,
-            min_grid_size,
             FOUR_PI_EC,
         );
 
-        // Check convergence by computing residual norm
-        let residual = compute_residual(
+        // Check convergence without allocating a full residual vector
+        let rms_val = compute_rms_residual(
             grid,
             &potential,
             charge_map,
@@ -823,16 +1098,30 @@ pub fn solve_lpbe_multigrid(
             kappa_sq,
             FOUR_PI_EC,
         );
-        let rms_val = rms_interior_residual(grid, &residual);
 
-        // Detect divergence: if residual grows significantly, fall back to plain SOR
-        if rms_val > prev_rms * 1e6 || !rms_val.is_finite() {
+        // Track best residual seen
+        if rms_val < best_rms {
+            best_rms = rms_val;
+            growing_count = 0;
+        } else {
+            growing_count += 1;
+        }
+
+        // Detect divergence: NaN/Inf, large growth from best, or sustained growth
+        let diverged = !rms_val.is_finite()
+            || rms_val > best_rms * 1e4
+            || (growing_count >= 5 && rms_val > prev_rms);
+
+        if diverged {
             log::warn!(
-                "Multigrid diverged at cycle {} (rms={:.2e}), falling back to plain SOR",
+                "Multigrid diverged at cycle {} (rms={:.2e}, best={:.2e}), falling back to plain SOR with partial solution",
                 cycle + 1,
-                rms_val
+                rms_val,
+                best_rms,
             );
-            return solve_lpbe(
+            // Continue from the partially-converged potential instead of
+            // starting from scratch, saving the work done so far.
+            return solve_lpbe_initial(
                 grid,
                 charge_map,
                 dielectrics,
@@ -844,6 +1133,7 @@ pub fn solve_lpbe_multigrid(
                 eps_out,
                 tolerance,
                 max_iterations,
+                Some(potential),
             );
         }
         prev_rms = rms_val;
@@ -859,7 +1149,7 @@ pub fn solve_lpbe_multigrid(
     }
 
     // Did not converge -- compute final residual
-    let residual = compute_residual(
+    let rms_val = compute_rms_residual(
         grid,
         &potential,
         charge_map,
@@ -867,7 +1157,6 @@ pub fn solve_lpbe_multigrid(
         kappa_sq,
         FOUR_PI_EC,
     );
-    let rms_val = rms_interior_residual(grid, &residual);
 
     PbSolveResult {
         potential,

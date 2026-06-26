@@ -3,6 +3,11 @@ members = [
     "crates/core",
     "crates/bindings",
     "crates/mmpbsa",
+    "crates/ipsae",
+    "crates/tleap",
+    "crates/minimize",
+    "crates/am1",
+    "crates/antechamber",
 ]
 resolver = "2"
 

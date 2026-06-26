@@ -5,4 +5,6 @@
 //! - INPCRD/RST7: Coordinate/restart files
 
 pub mod inpcrd;
+pub mod inpcrd_writer;
 pub mod prmtop;
+pub mod prmtop_writer;

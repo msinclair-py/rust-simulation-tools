@@ -21,6 +21,15 @@ use rst_core::selection::Selection;
 use rst_core::trajectory::dcd::{read_dcd_header, DcdReader};
 use rst_core::wrapping::unwrap_system;
 
+use rst_ipsae::{ChainType, ScoringParams};
+
+use rst_tleap::IonCount;
+
+use rst_minimize::config::MinimizeConfig;
+use rst_minimize::force::EnergyComponents;
+use rst_minimize::io as minimize_io;
+use rst_minimize::minimizer;
+
 use rst_mmpbsa::binding::{self, BindingConfig, SolvationMethod, TrajectoryFormat};
 use rst_mmpbsa::decomposition;
 use rst_mmpbsa::entropy;
@@ -2020,7 +2029,7 @@ impl PyMdcrdReader {
 
     fn read_frame<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyArray2<f64>>>> {
         match self.reader.read_frame() {
-            Ok(Some(coords)) => {
+            Ok(Some((coords, _box_dims))) => {
                 let n = coords.len();
                 let mut arr = Array2::<f64>::zeros((n, 3));
                 for (i, &[x, y, z]) in coords.iter().enumerate() {
@@ -2269,6 +2278,799 @@ fn extract_subtopology_py(topology: &PyAmberTopology, atom_indices: Vec<usize>) 
 }
 
 // ============================================================================
+// ipSAE
+// ============================================================================
+
+fn chain_pair_to_dict<'py>(
+    py: Python<'py>,
+    pair: &rst_ipsae::ChainPairScore,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new_bound(py);
+    d.set_item("chain1", &pair.chain1)?;
+    d.set_item("chain2", &pair.chain2)?;
+    d.set_item("pDockQ", pair.pdockq)?;
+    d.set_item("pDockQ2", pair.pdockq2)?;
+    d.set_item("LIS", pair.lis)?;
+    d.set_item("ipTM", pair.iptm)?;
+    d.set_item("ipSAE", pair.ipsae)?;
+    Ok(d)
+}
+
+fn ipsae_result_to_dict<'py>(
+    py: Python<'py>,
+    result: &rst_ipsae::IpsaeResult,
+) -> PyResult<Bound<'py, PyDict>> {
+    let directed: Vec<Bound<'py, PyDict>> = result
+        .directed_pairs
+        .iter()
+        .map(|p| chain_pair_to_dict(py, p))
+        .collect::<PyResult<_>>()?;
+    let max: Vec<Bound<'py, PyDict>> = result
+        .max_pairs
+        .iter()
+        .map(|p| chain_pair_to_dict(py, p))
+        .collect::<PyResult<_>>()?;
+
+    let out = PyDict::new_bound(py);
+    out.set_item("directed_pairs", PyList::new_bound(py, &directed))?;
+    out.set_item("max_pairs", PyList::new_bound(py, &max))?;
+    Ok(out)
+}
+
+#[pyfunction]
+#[pyo3(name = "compute_ipsae", signature = (structure_path, plddt, pae, pdockq_cutoff=8.0, pae_cutoff=12.0))]
+fn compute_ipsae_py<'py>(
+    py: Python<'py>,
+    structure_path: &str,
+    plddt: PyReadonlyArray1<'py, f64>,
+    pae: PyReadonlyArray1<'py, f64>,
+    pdockq_cutoff: f64,
+    pae_cutoff: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let params = ScoringParams {
+        pdockq_cutoff,
+        pae_cutoff,
+    };
+    let plddt_slice = plddt.as_slice().map_err(PyValueError::new_err)?;
+    let pae_slice = pae.as_slice().map_err(PyValueError::new_err)?;
+
+    let result = rst_ipsae::compute_ipsae(
+        std::path::Path::new(structure_path),
+        plddt_slice,
+        pae_slice,
+        &params,
+    )
+    .map_err(PyValueError::new_err)?;
+
+    ipsae_result_to_dict(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "compute_ipsae_from_arrays", signature = (coords, chains, chain_types, plddt, pae, pdockq_cutoff=8.0, pae_cutoff=12.0))]
+fn compute_ipsae_from_arrays_py<'py>(
+    py: Python<'py>,
+    coords: PyReadonlyArray2<'py, f64>,
+    chains: Vec<String>,
+    chain_types: std::collections::HashMap<String, String>,
+    plddt: PyReadonlyArray1<'py, f64>,
+    pae: PyReadonlyArray1<'py, f64>,
+    pdockq_cutoff: f64,
+    pae_cutoff: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let coords_arr = coords.as_array();
+    let n = coords_arr.shape()[0];
+    let mut coord_vec = Vec::with_capacity(n);
+    for i in 0..n {
+        coord_vec.push([coords_arr[[i, 0]], coords_arr[[i, 1]], coords_arr[[i, 2]]]);
+    }
+
+    let rust_chain_types: std::collections::HashMap<String, ChainType> = chain_types
+        .into_iter()
+        .map(|(k, v)| {
+            let ct = if v == "nucleic_acid" {
+                ChainType::NucleicAcid
+            } else {
+                ChainType::Protein
+            };
+            (k, ct)
+        })
+        .collect();
+
+    // Derive residue_names from chain_types (default to protein-like names)
+    let residue_names: Vec<String> = chains
+        .iter()
+        .map(|c| {
+            if rust_chain_types.get(c) == Some(&ChainType::NucleicAcid) {
+                "DA".to_string()
+            } else {
+                "ALA".to_string()
+            }
+        })
+        .collect();
+
+    let structure = rst_ipsae::Structure {
+        coords: coord_vec,
+        chains,
+        residue_names,
+        chain_types: rust_chain_types,
+    };
+
+    let params = ScoringParams {
+        pdockq_cutoff,
+        pae_cutoff,
+    };
+    let plddt_slice = plddt.as_slice().map_err(PyValueError::new_err)?;
+    let pae_slice = pae.as_slice().map_err(PyValueError::new_err)?;
+
+    let result =
+        rst_ipsae::scoring::compute_ipsae_scores(&structure, plddt_slice, pae_slice, &params)
+            .map_err(PyValueError::new_err)?;
+
+    ipsae_result_to_dict(py, &result)
+}
+
+// ============================================================================
+// TLEAP: SystemBuilder and System
+// ============================================================================
+
+/// A molecular system built from PDB, mol2, or mmCIF files.
+///
+/// Holds atoms, bonds, residues, and optional periodic box information.
+/// Created via `SystemBuilder.load_pdb()`, `SystemBuilder.load_mol2()`,
+/// `SystemBuilder.load_mmcif()`, or `SystemBuilder.combine()`.
+#[pyclass(name = "System")]
+struct PySystem {
+    inner: rst_tleap::System,
+}
+
+#[pymethods]
+impl PySystem {
+    /// Number of atoms in the system.
+    #[getter]
+    fn n_atoms(&self) -> usize {
+        self.inner.n_atoms()
+    }
+
+    /// Number of residues in the system.
+    #[getter]
+    fn n_residues(&self) -> usize {
+        self.inner.n_residues()
+    }
+
+    /// Total charge of the system (sum of all atom partial charges).
+    #[getter]
+    fn total_charge(&self) -> f64 {
+        self.inner.total_charge()
+    }
+
+    /// Periodic box dimensions [x, y, z] in Angstroms, or None for vacuum.
+    #[getter]
+    fn box_dimensions(&self) -> Option<[f64; 3]> {
+        self.inner.box_dimensions
+    }
+
+    /// Periodic box angles [alpha, beta, gamma] in degrees, or None.
+    #[getter]
+    fn box_angles(&self) -> Option<[f64; 3]> {
+        self.inner.box_angles
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<System: {} atoms, {} residues, charge={:.2}>",
+            self.inner.n_atoms(),
+            self.inner.n_residues(),
+            self.inner.total_charge()
+        )
+    }
+}
+
+/// High-level molecular system builder (tleap replacement).
+///
+/// Provides a programmatic API for building molecular systems:
+/// load force fields, load structures, combine, solvate, add ions,
+/// and write AMBER prmtop/inpcrd/PDB output files.
+///
+/// # Example
+///
+/// ```python
+/// builder = SystemBuilder()
+/// builder.load_protein_ff19sb()
+/// builder.load_water_opc()
+///
+/// system = builder.load_pdb("protein.pdb")
+/// builder.solvate_box(system, buffer=12.0)
+/// builder.add_ions(system, "Na+", count="neutralize")
+/// builder.write_amber(system, "system.prmtop", "system.inpcrd")
+/// ```
+#[pyclass(name = "SystemBuilder")]
+struct PySystemBuilder {
+    inner: rst_tleap::SystemBuilder,
+}
+
+#[pymethods]
+impl PySystemBuilder {
+    #[new]
+    fn new() -> Self {
+        PySystemBuilder {
+            inner: rst_tleap::SystemBuilder::new(),
+        }
+    }
+
+    // -- Force field loading --
+
+    /// Load the ff19SB protein force field.
+    fn load_protein_ff19sb(&mut self) -> PyResult<()> {
+        self.inner
+            .load_protein_ff19sb()
+            .map_err(PyValueError::new_err)?;
+        Ok(())
+    }
+
+    /// Load the Lipid21 force field.
+    fn load_lipid21(&mut self) -> PyResult<()> {
+        self.inner
+            .load_lipid21()
+            .map_err(PyValueError::new_err)?;
+        Ok(())
+    }
+
+    /// Load the GAFF2 general force field.
+    fn load_gaff2(&mut self) -> PyResult<()> {
+        self.inner
+            .load_gaff2()
+            .map_err(PyValueError::new_err)?;
+        Ok(())
+    }
+
+    /// Load the OPC water model and associated ion parameters.
+    fn load_water_opc(&mut self) -> PyResult<()> {
+        self.inner
+            .load_water_opc()
+            .map_err(PyValueError::new_err)?;
+        Ok(())
+    }
+
+    /// Load a custom `.lib` or `.off` residue library file from disk.
+    fn load_custom_lib(&mut self, path: &str) -> PyResult<()> {
+        self.inner
+            .load_custom_lib(std::path::Path::new(path))
+            .map_err(PyIOError::new_err)?;
+        Ok(())
+    }
+
+    /// Load a custom `frcmod` parameter modification file from disk.
+    fn load_custom_frcmod(&mut self, path: &str) -> PyResult<()> {
+        self.inner
+            .load_custom_frcmod(std::path::Path::new(path))
+            .map_err(PyIOError::new_err)?;
+        Ok(())
+    }
+
+    // -- Structure loading --
+
+    /// Load a PDB file and return a System.
+    fn load_pdb(&self, path: &str) -> PyResult<PySystem> {
+        let system = self
+            .inner
+            .load_pdb(std::path::Path::new(path))
+            .map_err(PyIOError::new_err)?;
+        Ok(PySystem { inner: system })
+    }
+
+    /// Load a mol2 file (pre-parameterized by antechamber) and return a System.
+    fn load_mol2(&self, path: &str) -> PyResult<PySystem> {
+        let system = self
+            .inner
+            .load_mol2(std::path::Path::new(path))
+            .map_err(PyIOError::new_err)?;
+        Ok(PySystem { inner: system })
+    }
+
+    /// Load an mmCIF file and return a System.
+    fn load_mmcif(&self, path: &str) -> PyResult<PySystem> {
+        let system = self
+            .inner
+            .load_mmcif(std::path::Path::new(path))
+            .map_err(PyIOError::new_err)?;
+        Ok(PySystem { inner: system })
+    }
+
+    /// Load a ligand file (SDF or mol2) and parameterize it with GAFF2 + AM1-BCC.
+    ///
+    /// Runs the antechamber pipeline internally to assign GAFF2 atom types
+    /// and AM1-BCC charges, then returns a System ready for simulation.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the input file (.sdf, .mol, or .mol2).
+    /// * `net_charge` - Net molecular charge (default 0).
+    #[pyo3(signature = (path, net_charge=0))]
+    fn load_ligand(&self, path: &str, net_charge: i32) -> PyResult<PySystem> {
+        let system = self
+            .inner
+            .load_ligand(std::path::Path::new(path), net_charge)
+            .map_err(PyValueError::new_err)?;
+        Ok(PySystem { inner: system })
+    }
+
+    /// Combine multiple systems into one.
+    ///
+    /// All atoms, bonds, and residues are concatenated with proper index
+    /// offsets. Returns a new combined System.
+    fn combine(&self, systems: Vec<PyRef<PySystem>>) -> PySystem {
+        let rust_systems: Vec<rst_tleap::System> =
+            systems.iter().map(|s| s.inner.clone()).collect();
+        let combined = self.inner.combine(rust_systems);
+        PySystem { inner: combined }
+    }
+
+    // -- Solvation and ions --
+
+    /// Solvate the system in a rectangular box of OPC water.
+    ///
+    /// # Arguments
+    /// * `system` - System to solvate (modified in place).
+    /// * `buffer` - Buffer distance in Angstroms on each side (default 12.0).
+    /// * `closeness` - Minimum solute-solvent distance in Angstroms (default 1.0).
+    #[pyo3(signature = (system, buffer=12.0, closeness=1.0))]
+    fn solvate_box(
+        &self,
+        system: &mut PySystem,
+        buffer: f64,
+        closeness: f64,
+    ) -> PyResult<()> {
+        self.inner
+            .solvate_box(&mut system.inner, buffer, closeness)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Add ions to a solvated system by replacing water molecules.
+    ///
+    /// # Arguments
+    /// * `system` - The solvated system (modified in place).
+    /// * `ion` - Ion residue name (e.g. "Na+", "Cl-", "K+").
+    /// * `count` - One of:
+    ///   - ``"neutralize"`` (default) — add counterions to neutralize the
+    ///     system charge.
+    ///   - An **integer** — add exactly that many ions.
+    ///   - A **float** — interpreted as a molar concentration (e.g. ``0.150``
+    ///     for 150 mM).  The number of ions is computed from the water count
+    ///     using ``n = round(C * n_water / (55.5 + 2*C))``.
+    ///
+    /// # Returns
+    /// The number of ions actually placed.
+    #[pyo3(signature = (system, ion, count=None))]
+    fn add_ions(
+        &self,
+        system: &mut PySystem,
+        ion: &str,
+        count: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<usize> {
+        let ion_count = match count {
+            None => IonCount::Neutralize,
+            Some(obj) => {
+                if let Ok(s) = obj.extract::<String>() {
+                    match s.to_lowercase().as_str() {
+                        "neutralize" => IonCount::Neutralize,
+                        _ => {
+                            return Err(PyValueError::new_err(format!(
+                                "Invalid count string '{}'. \
+                                 Use 'neutralize', an integer, or a float concentration in M.",
+                                s
+                            )));
+                        }
+                    }
+                } else if let Ok(n) = obj.extract::<usize>() {
+                    IonCount::Count(n)
+                } else if let Ok(c) = obj.extract::<f64>() {
+                    IonCount::Concentration(c)
+                } else {
+                    return Err(PyValueError::new_err(
+                        "count must be 'neutralize', a positive integer, \
+                         or a float concentration in M (e.g. 0.150 for 150 mM)",
+                    ));
+                }
+            }
+        };
+
+        self.inner
+            .add_ions(&mut system.inner, ion, ion_count)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Add a 1:1 salt at a target molar concentration.
+    ///
+    /// Convenience method that (1) neutralizes the system charge with the
+    /// appropriate counterion and (2) adds equal numbers of cation and anion
+    /// to reach the target concentration.
+    ///
+    /// # Arguments
+    /// * `system` - The solvated system (modified in place).
+    /// * `cation` - Cation residue name (default ``"Na+"``).
+    /// * `anion` - Anion residue name (default ``"Cl-"``).
+    /// * `concentration` - Target salt concentration in mol/L (default 0.150
+    ///   for 150 mM).
+    ///
+    /// # Returns
+    /// Tuple ``(n_cation, n_anion)`` — total ions of each type placed
+    /// (neutralization + excess).
+    #[pyo3(signature = (system, cation="Na+", anion="Cl-", concentration=0.150))]
+    fn add_salt(
+        &self,
+        system: &mut PySystem,
+        cation: &str,
+        anion: &str,
+        concentration: f64,
+    ) -> PyResult<(usize, usize)> {
+        self.inner
+            .add_salt(&mut system.inner, cation, anion, concentration)
+            .map_err(PyValueError::new_err)
+    }
+
+    // -- Output --
+
+    /// Write the prmtop (topology) file.
+    fn write_prmtop(&self, system: &PySystem, path: &str) -> PyResult<()> {
+        self.inner
+            .write_prmtop(&system.inner, std::path::Path::new(path))
+            .map_err(PyIOError::new_err)
+    }
+
+    /// Write the inpcrd (coordinates) file.
+    fn write_inpcrd(&self, system: &PySystem, path: &str) -> PyResult<()> {
+        self.inner
+            .write_inpcrd(&system.inner, std::path::Path::new(path))
+            .map_err(PyIOError::new_err)
+    }
+
+    /// Write a PDB file from the system.
+    fn write_pdb(&self, system: &PySystem, path: &str) -> PyResult<()> {
+        self.inner
+            .write_pdb(&system.inner, std::path::Path::new(path))
+            .map_err(PyIOError::new_err)
+    }
+
+    /// Write both prmtop and inpcrd files.
+    ///
+    /// # Arguments
+    /// * `system` - The system to write.
+    /// * `prmtop_path` - Path for the topology file.
+    /// * `inpcrd_path` - Path for the coordinate file.
+    fn write_amber(
+        &self,
+        system: &PySystem,
+        prmtop_path: &str,
+        inpcrd_path: &str,
+    ) -> PyResult<()> {
+        self.inner
+            .write_prmtop(&system.inner, std::path::Path::new(prmtop_path))
+            .map_err(PyIOError::new_err)?;
+        self.inner
+            .write_inpcrd(&system.inner, std::path::Path::new(inpcrd_path))
+            .map_err(PyIOError::new_err)?;
+        Ok(())
+    }
+
+    fn __repr__(&self) -> String {
+        "<SystemBuilder>".to_string()
+    }
+}
+
+// ============================================================================
+// MINIMIZE: Configuration and Results
+// ============================================================================
+
+/// Configuration for energy minimization.
+///
+/// Controls steepest-descent / conjugate-gradient minimization runs.
+/// All length quantities are in Angstroms, energy quantities in kcal/mol.
+///
+/// # Example
+///
+/// ```python
+/// config = MinimizeConfig(max_cycles=5000, sd_cycles=500, cutoff=10.0)
+/// ```
+#[pyclass(name = "MinimizeConfig")]
+#[derive(Clone)]
+struct PyMinimizeConfig {
+    inner: MinimizeConfig,
+}
+
+#[pymethods]
+impl PyMinimizeConfig {
+    #[new]
+    #[pyo3(signature = (
+        max_cycles=None,
+        sd_cycles=None,
+        convergence_rms=None,
+        cutoff=None,
+        restraint_mask=None,
+        restraint_weight=None,
+        initial_step_size=None,
+    ))]
+    fn new(
+        max_cycles: Option<usize>,
+        sd_cycles: Option<usize>,
+        convergence_rms: Option<f64>,
+        cutoff: Option<f64>,
+        restraint_mask: Option<String>,
+        restraint_weight: Option<f64>,
+        initial_step_size: Option<f64>,
+    ) -> Self {
+        let mut config = MinimizeConfig::default();
+        if let Some(v) = max_cycles {
+            config.max_cycles = v;
+        }
+        if let Some(v) = sd_cycles {
+            config.sd_cycles = v;
+        }
+        if let Some(v) = convergence_rms {
+            config.convergence_rms = v;
+        }
+        if let Some(v) = cutoff {
+            config.cutoff = v;
+        }
+        if restraint_mask.is_some() {
+            config.restraint_mask = restraint_mask;
+        }
+        if let Some(v) = restraint_weight {
+            config.restraint_weight = v;
+        }
+        if let Some(v) = initial_step_size {
+            config.initial_step_size = v;
+        }
+        PyMinimizeConfig { inner: config }
+    }
+
+    #[getter]
+    fn max_cycles(&self) -> usize {
+        self.inner.max_cycles
+    }
+    #[getter]
+    fn sd_cycles(&self) -> usize {
+        self.inner.sd_cycles
+    }
+    #[getter]
+    fn convergence_rms(&self) -> f64 {
+        self.inner.convergence_rms
+    }
+    #[getter]
+    fn cutoff(&self) -> f64 {
+        self.inner.cutoff
+    }
+    #[getter]
+    fn restraint_mask(&self) -> Option<String> {
+        self.inner.restraint_mask.clone()
+    }
+    #[getter]
+    fn restraint_weight(&self) -> f64 {
+        self.inner.restraint_weight
+    }
+    #[getter]
+    fn initial_step_size(&self) -> f64 {
+        self.inner.initial_step_size
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<MinimizeConfig: max_cycles={}, sd_cycles={}, convergence_rms={}, cutoff={}>",
+            self.inner.max_cycles,
+            self.inner.sd_cycles,
+            self.inner.convergence_rms,
+            self.inner.cutoff
+        )
+    }
+}
+
+/// Energy components from a force evaluation during minimization.
+///
+/// All values are in kcal/mol.
+#[pyclass(name = "EnergyComponents")]
+#[derive(Clone)]
+struct PyEnergyComponents {
+    inner: EnergyComponents,
+}
+
+#[pymethods]
+impl PyEnergyComponents {
+    #[getter]
+    fn bond(&self) -> f64 {
+        self.inner.bond
+    }
+    #[getter]
+    fn angle(&self) -> f64 {
+        self.inner.angle
+    }
+    #[getter]
+    fn dihedral(&self) -> f64 {
+        self.inner.dihedral
+    }
+    #[getter]
+    fn vdw(&self) -> f64 {
+        self.inner.vdw
+    }
+    #[getter]
+    fn elec_direct(&self) -> f64 {
+        self.inner.elec_direct
+    }
+    #[getter]
+    fn elec_recip(&self) -> f64 {
+        self.inner.elec_recip
+    }
+    #[getter]
+    fn vdw_14(&self) -> f64 {
+        self.inner.vdw_14
+    }
+    #[getter]
+    fn elec_14(&self) -> f64 {
+        self.inner.elec_14
+    }
+    #[getter]
+    fn restraint(&self) -> f64 {
+        self.inner.restraint
+    }
+
+    fn total(&self) -> f64 {
+        self.inner.total()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<EnergyComponents: total={:.4} kcal/mol>",
+            self.inner.total()
+        )
+    }
+}
+
+/// Result of an energy minimization run.
+///
+/// Attributes:
+///     final_energy: Final energy in kcal/mol.
+///     final_rms: Final RMS gradient in kcal/(mol*A).
+///     cycles: Number of minimization cycles performed.
+///     converged: Whether the minimization converged.
+///     energy_components: Breakdown of energy terms.
+#[pyclass(name = "MinimizeResult")]
+#[derive(Clone)]
+struct PyMinimizeResult {
+    inner: minimizer::MinimizeResult,
+}
+
+#[pymethods]
+impl PyMinimizeResult {
+    #[getter]
+    fn final_energy(&self) -> f64 {
+        self.inner.final_energy
+    }
+
+    #[getter]
+    fn final_rms(&self) -> f64 {
+        self.inner.final_rms
+    }
+
+    #[getter]
+    fn cycles(&self) -> usize {
+        self.inner.cycles
+    }
+
+    #[getter]
+    fn converged(&self) -> bool {
+        self.inner.converged
+    }
+
+    #[getter]
+    fn energy_components(&self) -> PyEnergyComponents {
+        PyEnergyComponents {
+            inner: self.inner.energy_components.clone(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<MinimizeResult: energy={:.4}, rms={:.6}, cycles={}, converged={}>",
+            self.inner.final_energy,
+            self.inner.final_rms,
+            self.inner.cycles,
+            self.inner.converged
+        )
+    }
+}
+
+/// Run energy minimization from file paths.
+///
+/// Reads the topology and coordinates, performs minimization, optionally
+/// writes the result to an output file, and returns the minimization result.
+///
+/// # Arguments
+/// * `prmtop_path` - Path to an AMBER prmtop file.
+/// * `inpcrd_path` - Path to an AMBER inpcrd file.
+/// * `config` - Minimization configuration.
+/// * `output` - Optional path to write minimized coordinates (inpcrd format).
+///
+/// # Returns
+/// A `MinimizeResult` with final energy, RMS gradient, cycle count, and
+/// convergence status.
+#[pyfunction]
+#[pyo3(name = "minimize", signature = (prmtop_path, inpcrd_path, config=None, output=None))]
+fn minimize_py(
+    prmtop_path: &str,
+    inpcrd_path: &str,
+    config: Option<&PyMinimizeConfig>,
+    output: Option<&str>,
+) -> PyResult<PyMinimizeResult> {
+    let topology = parse_prmtop(prmtop_path).map_err(PyIOError::new_err)?;
+
+    let (mut positions, mut box_dims) =
+        minimize_io::read_inpcrd(std::path::Path::new(inpcrd_path))
+            .map_err(PyIOError::new_err)?;
+
+    let cfg = config
+        .map(|c| c.inner.clone())
+        .unwrap_or_default();
+
+    let result = minimizer::minimize(&topology, &mut positions, &mut box_dims, &cfg)
+        .map_err(PyValueError::new_err)?;
+
+    if let Some(out_path) = output {
+        minimize_io::write_minimized_coords(
+            std::path::Path::new(out_path),
+            &positions,
+            box_dims,
+            "minimized coordinates",
+        )
+        .map_err(PyIOError::new_err)?;
+    }
+
+    Ok(PyMinimizeResult { inner: result })
+}
+
+/// Run energy minimization using an existing AmberTopology object.
+///
+/// Similar to `minimize()` but accepts a pre-loaded topology instead of
+/// a file path, avoiding redundant file I/O.
+///
+/// # Arguments
+/// * `topology` - An AmberTopology object (from `read_prmtop`).
+/// * `inpcrd_path` - Path to an AMBER inpcrd file.
+/// * `config` - Minimization configuration.
+/// * `output` - Optional path to write minimized coordinates (inpcrd format).
+///
+/// # Returns
+/// A `MinimizeResult` with final energy, RMS gradient, cycle count, and
+/// convergence status.
+#[pyfunction]
+#[pyo3(name = "minimize_topology", signature = (topology, inpcrd_path, config=None, output=None))]
+fn minimize_topology_py(
+    topology: &PyAmberTopology,
+    inpcrd_path: &str,
+    config: Option<&PyMinimizeConfig>,
+    output: Option<&str>,
+) -> PyResult<PyMinimizeResult> {
+    let (mut positions, mut box_dims) =
+        minimize_io::read_inpcrd(std::path::Path::new(inpcrd_path))
+            .map_err(PyIOError::new_err)?;
+
+    let cfg = config
+        .map(|c| c.inner.clone())
+        .unwrap_or_default();
+
+    let result = minimizer::minimize(&topology.inner, &mut positions, &mut box_dims, &cfg)
+        .map_err(PyValueError::new_err)?;
+
+    if let Some(out_path) = output {
+        minimize_io::write_minimized_coords(
+            std::path::Path::new(out_path),
+            &positions,
+            box_dims,
+            "minimized coordinates",
+        )
+        .map_err(PyIOError::new_err)?;
+    }
+
+    Ok(PyMinimizeResult { inner: result })
+}
+
+// ============================================================================
 // MODULE DEFINITION
 // ============================================================================
 
@@ -2337,5 +3139,224 @@ fn rust_simulation_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quasi_harmonic_entropy_py, m)?)?;
     m.add_function(wrap_pyfunction!(extract_subtopology_py, m)?)?;
 
+    // ipSAE
+    m.add_function(wrap_pyfunction!(compute_ipsae_py, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_ipsae_from_arrays_py, m)?)?;
+
+    // tleap (System Builder)
+    m.add_class::<PySystem>()?;
+    m.add_class::<PySystemBuilder>()?;
+
+    // Minimize
+    m.add_class::<PyMinimizeConfig>()?;
+    m.add_class::<PyEnergyComponents>()?;
+    m.add_class::<PyMinimizeResult>()?;
+    m.add_function(wrap_pyfunction!(minimize_py, m)?)?;
+    m.add_function(wrap_pyfunction!(minimize_topology_py, m)?)?;
+
+    // Antechamber / AM1
+    m.add_function(wrap_pyfunction!(parameterize_ligand_py, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_am1_charges_py, m)?)?;
+
     Ok(())
+}
+
+// ============================================================================
+// ANTECHAMBER / AM1
+// ============================================================================
+
+/// Parameterize a small-molecule ligand: assign GAFF2 atom types and AM1-BCC charges.
+///
+/// Reads an SDF or mol2 input file, runs the antechamber pipeline (ring detection,
+/// aromaticity, bond/atom typing, AM1-BCC or Gasteiger charges), and writes a
+/// parameterized mol2 file.
+///
+/// # Arguments
+/// * `input_path` - Path to the input file (SDF or mol2).
+/// * `output_path` - Path for the output mol2 file.
+/// * `net_charge` - Net molecular charge (default 0).
+/// * `charge_method` - Charge method: "am1bcc" (default) or "gasteiger".
+#[pyfunction]
+#[pyo3(name = "parameterize_ligand", signature = (input_path, output_path, net_charge=0, charge_method="am1bcc"))]
+fn parameterize_ligand_py(
+    input_path: &str,
+    output_path: &str,
+    net_charge: i32,
+    charge_method: &str,
+) -> PyResult<()> {
+    let path = std::path::Path::new(input_path);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let ac_mol = match ext.as_str() {
+        "sdf" | "mol" => {
+            let mols = rst_core::sdf::parse_sdf_file(path)
+                .map_err(PyIOError::new_err)?;
+            if mols.is_empty() {
+                return Err(PyValueError::new_err("No molecules found in SDF file"));
+            }
+            rst_antechamber::molecule::AcMolecule::from_sdf(&mols[0])
+        }
+        "mol2" => {
+            let mol2 = rst_core::mol2::parse_mol2_file(path)
+                .map_err(PyIOError::new_err)?;
+            rst_antechamber::molecule::AcMolecule::from_mol2(&mol2)
+        }
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "Unsupported input format '{}'. Use .sdf, .mol, or .mol2",
+                ext
+            )));
+        }
+    };
+
+    let method = match charge_method {
+        "am1bcc" | "AM1BCC" | "am1-bcc" | "AM1-BCC" => rst_antechamber::ChargeMethod::Am1Bcc,
+        "gasteiger" | "Gasteiger" | "GASTEIGER" | "gas" => rst_antechamber::ChargeMethod::Gasteiger,
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "Unknown charge method '{}'. Use 'am1bcc' or 'gasteiger'",
+                charge_method
+            )));
+        }
+    };
+
+    let config = rst_antechamber::AntechamberConfig {
+        net_charge,
+        charge_method: method,
+    };
+
+    let result = rst_antechamber::run_antechamber(ac_mol, &config)
+        .map_err(PyValueError::new_err)?;
+
+    let mol2_out = rst_antechamber::to_mol2(&result);
+
+    // Write mol2 file
+    write_mol2_file(&mol2_out, std::path::Path::new(output_path))
+        .map_err(PyIOError::new_err)?;
+
+    Ok(())
+}
+
+/// Compute AM1 Mulliken charges for a molecule.
+///
+/// # Arguments
+/// * `atomic_numbers` - Array of atomic numbers.
+/// * `coords` - Nx3 array of Cartesian coordinates in Angstroms.
+/// * `charge` - Net molecular charge (default 0).
+///
+/// # Returns
+/// Array of Mulliken partial charges.
+#[pyfunction]
+#[pyo3(name = "compute_am1_charges", signature = (atomic_numbers, coords, charge=0))]
+fn compute_am1_charges_py<'py>(
+    py: Python<'py>,
+    atomic_numbers: PyReadonlyArray1<'py, i64>,
+    coords: PyReadonlyArray2<'py, f64>,
+    charge: i32,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let an_view = atomic_numbers.as_array();
+    let coord_view = coords.as_array();
+
+    let n = an_view.len();
+    if coord_view.shape()[0] != n || coord_view.shape()[1] != 3 {
+        return Err(PyValueError::new_err(format!(
+            "Expected coords shape ({}, 3), got ({}, {})",
+            n,
+            coord_view.shape()[0],
+            coord_view.shape()[1]
+        )));
+    }
+
+    let an: Vec<u8> = an_view.iter().map(|&x| x as u8).collect();
+    let c: Vec<[f64; 3]> = (0..n)
+        .map(|i| [coord_view[[i, 0]], coord_view[[i, 1]], coord_view[[i, 2]]])
+        .collect();
+
+    let charges = rst_am1::compute_am1_charges(&an, &c, charge)
+        .map_err(PyValueError::new_err)?;
+
+    Ok(charges.to_pyarray_bound(py))
+}
+
+/// Write a mol2 file from a Mol2Molecule struct.
+fn write_mol2_file(
+    mol: &rst_core::mol2::Mol2Molecule,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    use std::fmt::Write as FmtWrite;
+    use std::fs;
+
+    let mut content = String::new();
+
+    // MOLECULE section
+    writeln!(content, "@<TRIPOS>MOLECULE").unwrap();
+    writeln!(content, "{}", mol.name).unwrap();
+    writeln!(
+        content,
+        "{:>5}{:>6}{:>6}{:>6}{:>6}",
+        mol.atoms.len(),
+        mol.bonds.len(),
+        mol.substructures.len(),
+        0,
+        0
+    )
+    .unwrap();
+    writeln!(content, "SMALL").unwrap();
+    writeln!(content, "USER_CHARGES").unwrap();
+    writeln!(content).unwrap();
+
+    // ATOM section
+    writeln!(content, "@<TRIPOS>ATOM").unwrap();
+    for atom in &mol.atoms {
+        writeln!(
+            content,
+            "{:>7} {:<8} {:>10.4} {:>10.4} {:>10.4} {:<8} {:>5} {:<8} {:>10.6}",
+            atom.id,
+            atom.name,
+            atom.position[0],
+            atom.position[1],
+            atom.position[2],
+            atom.atom_type,
+            atom.residue_id,
+            atom.residue_name,
+            atom.charge,
+        )
+        .unwrap();
+    }
+
+    // BOND section
+    writeln!(content, "@<TRIPOS>BOND").unwrap();
+    for (i, bond) in mol.bonds.iter().enumerate() {
+        writeln!(
+            content,
+            "{:>6}{:>5}{:>5} {}",
+            i + 1,
+            bond.atom1 + 1,
+            bond.atom2 + 1,
+            bond.bond_type,
+        )
+        .unwrap();
+    }
+
+    // SUBSTRUCTURE section
+    if !mol.substructures.is_empty() {
+        writeln!(content, "@<TRIPOS>SUBSTRUCTURE").unwrap();
+        for sub in &mol.substructures {
+            writeln!(
+                content,
+                "{:>7} {:<8} {:>5} TEMP              0 ****  ****    0 ROOT",
+                sub.id,
+                sub.name,
+                sub.root_atom + 1,
+            )
+            .unwrap();
+        }
+    }
+
+    fs::write(path, content)
+        .map_err(|e| format!("Failed to write mol2 file '{}': {}", path.display(), e))
 }
