@@ -3,3 +3,4 @@ problem/
 data/
 .DS_Store
 mmpbsa_test/
+*.rlib
